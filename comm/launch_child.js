@@ -217,6 +217,10 @@ function cmdRegister(subArgs) {
 // ─── launch ───
 
 function cmdLaunch(subArgs) {
+  if (process.env.TMUX || process.env.PSMUX) {
+    process.stderr.write('nested psmux/tmux not supported — refusing to new-session inside an existing multiplexer\n');
+    process.exit(1);
+  }
   let model = null, runtime = 'claude';
   let sessionName = `child-${Math.floor(Date.now() / 1000)}`;
   const passthrough = [];
@@ -459,6 +463,7 @@ async function cmdRun(subArgs) {
   let runtime = null, model = null, sessionName = null;
   let outFile = null, eventsFile = null, timeoutMs = 300000, keep = false;
   let prompt = null;
+  let terminated = false, fatalDetected = false, fatalExcerpt = '';
 
   for (let i = 0; i < subArgs.length; i++) {
     const a = subArgs[i];
@@ -545,11 +550,41 @@ async function cmdRun(subArgs) {
     process.exit(1);
   }
 
+  // 启动期哨兵：8s 后 capture-pane 看 claude 是否报 fatal 错（model 不存在 / auth 失败 / 未登录）
+  const FATAL_PATTERNS = [
+    /There's an issue with the selected model/,
+    /model.*may not exist/i,
+    /unauthorized/i,
+    /invalid.*api/i,
+    /auth.*token.*invalid/i,
+    /Please log in/i,
+  ];
+  const fatalTimer = setTimeout(() => {
+    if (terminated) return;
+    const capRes = spawnSync('psmux', ['capture-pane', '-t', sessionName, '-p'], { encoding: 'utf8' });
+    const pane = capRes.stdout || '';
+    // 只扫 claude 输出行（● 开头或 错误标识），不扫用户 prompt（❯ 开头）
+    const lines = pane.split('\n').filter(l => !/^❯\s*/.test(l));
+    const joined = lines.join('\n');
+    for (const re of FATAL_PATTERNS) {
+      if (re.test(joined)) {
+        fatalDetected = true;
+        fatalExcerpt = joined.match(re)[0];
+        break;
+      }
+    }
+  }, 8000);
+
   // Step 4: wait for stop / stop_failure / timeout
   let final_state = 'timeout', timed_out = true;
   while (Date.now() - sendStart < timeoutMs) {
     await new Promise(r => setTimeout(r, 200));
     scanEvents(sendAt);
+    if (fatalDetected) {
+      final_state = 'stop_failure';
+      timed_out = false;
+      break;
+    }
     const terminal = events.find(e => e.state === 'stop' || e.state === 'stop_failure');
     if (terminal) {
       final_state = terminal.state;
@@ -557,6 +592,8 @@ async function cmdRun(subArgs) {
       break;
     }
   }
+  terminated = true;
+  clearTimeout(fatalTimer);
 
   // Step 5: extract result
   let extract_source = 'pane_full_fallback';
@@ -602,6 +639,13 @@ async function cmdRun(subArgs) {
     timed_out,
     extract_source,
   };
+  if (timed_out || final_state === 'stop_failure' || fatalDetected) {
+    try {
+      const capRes = spawnSync('psmux', ['capture-pane', '-t', sessionName, '-p', '-S', '-200'], { encoding: 'utf8' });
+      out.error_excerpt = (capRes.stdout || '').split('\n').slice(-40).join('\n').trim();
+    } catch {}
+    if (fatalDetected) out.fatal_excerpt = fatalExcerpt;
+  }
   console.log(JSON.stringify(out));
 
   if (timed_out) process.exit(2);
