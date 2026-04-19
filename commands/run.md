@@ -1,7 +1,5 @@
 ---
-description: Dispatch a one-shot task to a child agent and return the result. Use for delegating work that needs fresh context or different model capabilities.
+description: /agent-comm:run [--runtime X] [--model Y] -- PROMPT
 ---
-
-Use the `agent-comm:run-child` subagent to forward this request:
-
-$ARGUMENTS
+Use the `agent-comm:run-child` subagent.
+Forward $ARGUMENTS verbatim. Do not add defaults here.
