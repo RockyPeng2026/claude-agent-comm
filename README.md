@@ -42,7 +42,7 @@ install.js                # 跨平台 Node 安装脚本（copy 到目标项目 .
 
 > ⚠️ *nix (tmux + bash) 支持**未实现**；代码路径硬编码 `psmux` + PowerShell。跟进 [issue #N](https://github.com/RockyPeng2026/claude-agent-comm/issues) 或提 PR 加分支。
 
-> 🔐 **alpha 阶段安全提示**：当前 claude runtime 启动时会把 `ANTHROPIC_AUTH_TOKEN` 拼进 psmux `send-keys` 文本（泄露到 pane scrollback）。生产凭证**不要**放进 `.env`，只用 z.ai 代理或测试 key。修复在路上（issue #N）。
+> 🔐 **alpha 阶段安全提示**：claude runtime 的 env（含 `ANTHROPIC_AUTH_TOKEN`）经 `.claude/signals/session-env/<session>.ps1`（mode 600，source + 立即删）中转，不再进 pane scrollback。但该文件在 Windows NTFS 下 POSIX mode 仅 best-effort，异常退出可能残留。生产凭证建议仍用 z.ai 代理或受限 scope token，不要放 root-equiv 主 key。
 
 ## 安装到目标项目
 

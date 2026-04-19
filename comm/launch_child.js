@@ -9,6 +9,29 @@ function esc(s) { return "'" + s.replace(/'/g, "''") + "'"; }
 
 // ─── shared ───
 
+const SESSION_NAME_RE = /^[A-Za-z0-9._-]+$/;
+function assertValidSessionName(value, flagName) {
+  if (!SESSION_NAME_RE.test(String(value || ''))) {
+    process.stderr.write(`${flagName} "${value}" invalid (allowed: A-Z a-z 0-9 . _ -)\n`);
+    process.exit(1);
+  }
+}
+
+function sessionPath(session, suffix) {
+  // suffix: '.json' | '.tombstone.json'
+  const target = path.resolve(SESSIONS_DIR, `${session}${suffix}`);
+  if (!target.startsWith(SESSIONS_DIR + path.sep) && target !== path.join(SESSIONS_DIR, `${session}${suffix}`)) {
+    process.stderr.write(`session name "${session}" resolves outside sessions dir\n`);
+    process.exit(1);
+  }
+  return target;
+}
+
+function clearStaleTombstone(session) {
+  const tombPath = sessionPath(session, '.tombstone.json');
+  try { fs.unlinkSync(tombPath); } catch (e) { if (e.code !== 'ENOENT') throw e; }
+}
+
 function usage() {
   process.stderr.write(
     'Usage: node launch_child.js <subcommand> [options]\n' +
@@ -23,7 +46,8 @@ function usage() {
 }
 
 function readRegistry(session) {
-  const p = path.join(SESSIONS_DIR, `${session}.json`);
+  assertValidSessionName(session, '--session');
+  const p = sessionPath(session, '.json');
   if (!fs.existsSync(p)) {
     process.stderr.write(`session "${session}" not found in registry\n`);
     process.exit(1);
@@ -128,16 +152,19 @@ function cmdRegister(subArgs) {
     process.exit(1);
   }
 
-  const regPath = path.join(SESSIONS_DIR, `${sessionName}.json`);
+  const regPath = sessionPath(sessionName, '.json');
   if (fs.existsSync(regPath) && !force) {
     process.stderr.write(`session "${sessionName}" already registered, use --force\n`);
     process.exit(1);
   }
 
+  // Clear stale tombstone so watcher accepts future signals
+  clearStaleTombstone(sessionName);
+
   const signalDir = path.join(PROJECT, '.claude', 'signals', 'child-events');
   const regData = {
     session: sessionName, runtime, model, pid,
-    signal_dir: signalDir, passthrough: [],
+    signal_dir: signalDir,
     started_at: new Date().toISOString(),
     registered: true
   };
@@ -205,6 +232,9 @@ function cmdLaunch(subArgs) {
     process.exit(1);
   }
 
+  // Clear stale tombstone from prior session with same name
+  clearStaleTombstone(sessionName);
+
   // Step 1: Create psmux session
   const ns = spawnSync('psmux', ['new-session', '-d', '-s', sessionName], { stdio: 'inherit' });
   if (ns.status !== 0) {
@@ -212,12 +242,14 @@ function cmdLaunch(subArgs) {
     process.exit(1);
   }
 
-  // Step 2: Write registry BEFORE send-keys (watcher needs it to accept first signal)
-  const regPath = path.join(SESSIONS_DIR, `${sessionName}.json`);
+  // Step 2: Write registry BEFORE send-keys (watcher needs it to accept first signal).
+  // 不持久化 passthrough（可能含 key / PII），仅记计数。
+  const regPath = sessionPath(sessionName, '.json');
   const regData = {
     session: sessionName, runtime, model,
     pid: process.pid, signal_dir: signalDir,
-    passthrough, started_at: new Date().toISOString()
+    passthrough_count: passthrough.length,
+    started_at: new Date().toISOString()
   };
   try {
     const ok = writeRegistryAtomic(regPath, regData, false);
@@ -294,15 +326,19 @@ function cmdLaunch(subArgs) {
 function cmdKill(subArgs) {
   let sessionName = null;
   for (let i = 0; i < subArgs.length; i++) {
-    if (subArgs[i] === '--session' && i + 1 < subArgs.length) sessionName = subArgs[++i];
+    if (subArgs[i] === '--session') {
+      if (i + 1 >= subArgs.length || subArgs[i + 1].startsWith('--')) { process.stderr.write('--session requires a value\n'); process.exit(1); }
+      sessionName = subArgs[++i];
+    }
   }
   if (!sessionName) { process.stderr.write('kill requires --session\n'); process.exit(1); }
+  assertValidSessionName(sessionName, '--session');
 
   readRegistry(sessionName);
-  const regPath = path.join(SESSIONS_DIR, `${sessionName}.json`);
+  const regPath = sessionPath(sessionName, '.json');
 
   // Tombstone first — watcher sees it and discards in-flight signals
-  atomicWrite(path.join(SESSIONS_DIR, `${sessionName}.tombstone.json`), {
+  atomicWrite(sessionPath(sessionName, '.tombstone.json'), {
     session: sessionName,
     killed_at: new Date().toISOString(),
     reason: 'user kill'
@@ -339,9 +375,13 @@ function cmdList() {
 function cmdStatus(subArgs) {
   let sessionName = null;
   for (let i = 0; i < subArgs.length; i++) {
-    if (subArgs[i] === '--session' && i + 1 < subArgs.length) sessionName = subArgs[++i];
+    if (subArgs[i] === '--session') {
+      if (i + 1 >= subArgs.length || subArgs[i + 1].startsWith('--')) { process.stderr.write('--session requires a value\n'); process.exit(1); }
+      sessionName = subArgs[++i];
+    }
   }
   if (!sessionName) { process.stderr.write('status requires --session\n'); process.exit(1); }
+  assertValidSessionName(sessionName, '--session');
 
   const reg = readRegistry(sessionName);
 
@@ -367,11 +407,21 @@ function cmdStatus(subArgs) {
 async function cmdSend(subArgs) {
   let sessionName = null, text = null;
   for (let i = 0; i < subArgs.length; i++) {
-    if (subArgs[i] === '--session' && i + 1 < subArgs.length) sessionName = subArgs[++i];
-    else if (subArgs[i] === '--text' && i + 1 < subArgs.length) text = subArgs[++i];
+    if (subArgs[i] === '--session') {
+      if (i + 1 >= subArgs.length || subArgs[i + 1].startsWith('--')) { process.stderr.write('--session requires a value\n'); process.exit(1); }
+      sessionName = subArgs[++i];
+    } else if (subArgs[i] === '--text') {
+      // --text 的值不走 startsWith('--') 拦截（用户可能发以 -- 开头的 prompt）。
+      // 用 `--text=<VALUE>` 显式传以 -- 开头的值避免歧义。
+      if (i + 1 >= subArgs.length) { process.stderr.write('--text requires a value\n'); process.exit(1); }
+      text = subArgs[++i];
+    } else if (subArgs[i].startsWith('--text=')) {
+      text = subArgs[i].slice('--text='.length);
+    }
   }
   if (!sessionName) { process.stderr.write('send requires --session\n'); process.exit(1); }
-  if (!text) { process.stderr.write('send requires --text\n'); process.exit(1); }
+  assertValidSessionName(sessionName, '--session');
+  if (text === null) { process.stderr.write('send requires --text\n'); process.exit(1); }
 
   const reg = readRegistry(sessionName);
 
