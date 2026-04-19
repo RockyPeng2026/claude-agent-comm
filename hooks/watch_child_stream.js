@@ -21,13 +21,27 @@ const sessionsDir = path.join(path.dirname(signalDir), 'sessions');
 
 fs.mkdirSync(signalDir, { recursive: true });
 
+// LRU: 最多 100 条，重新 warn 时挪到末尾；超限淘汰最旧。
+const ORPHAN_LRU_MAX = 100;
 const orphanWarned = new Map();
+function touchOrphan(session) {
+  if (orphanWarned.has(session)) {
+    const c = orphanWarned.get(session);
+    orphanWarned.delete(session);
+    orphanWarned.set(session, c + 1);
+    return c + 1;
+  }
+  orphanWarned.set(session, 1);
+  if (orphanWarned.size > ORPHAN_LRU_MAX) {
+    const oldest = orphanWarned.keys().next().value;
+    orphanWarned.delete(oldest);
+  }
+  return 1;
+}
 
 process.stdout.on('error', (e) => { if (e.code === 'EPIPE') process.exit(0); });
 
 function tick() {
-  if (orphanWarned.size > 100) orphanWarned.clear();
-
   let items;
   try {
     items = fs.readdirSync(signalDir).filter(f => f.endsWith('.signal')).sort();
@@ -46,8 +60,7 @@ function tick() {
     const tombPath = path.join(sessionsDir, `${session}.tombstone.json`);
     if (!fs.existsSync(regPath) || fs.existsSync(tombPath)) {
       try { fs.unlinkSync(path.join(signalDir, name)); } catch {}
-      const count = (orphanWarned.get(session) || 0) + 1;
-      orphanWarned.set(session, count);
+      const count = touchOrphan(session);
       if (count === 1) {
         process.stderr.write(`watcher: orphan signal for unregistered session "${session}" (further suppressed)\n`);
       }

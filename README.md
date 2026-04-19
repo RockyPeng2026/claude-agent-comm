@@ -1,81 +1,112 @@
 # claude-agent-comm
 
-父子 Claude Code agent 通信框架。父 Claude 通过 psmux/tmux 启动子 CLI（claude / codex / 其他），子进程的 hook 写 signal 文件，父侧 watcher emit 到 Monitor，实现**事件驱动、非阻塞、多 runtime** 的子 agent 管理。
+> 中文版 → [README.zh.md](./README.zh.md)
 
-## 目录
+Parent/child Claude Code agent communication framework. Parent Claude launches a child CLI (claude / codex / …) inside a psmux session; the child's Claude Code hooks write signal files; a watcher in the parent emits events through a `Monitor` tool. Result: **event-driven, non-blocking, multi-runtime** child agent orchestration.
+
+## Directory
 
 ```
-comm/                     # 启动器 + 框架文档 + spec
-  launch_child.js         # 主脚本：subcommands launch/kill/list/status/send/register
-  CLAUDE.md               # 协议文档（hook 事件格式、父 agent 纪律）
-  wave*_spec.md           # 历次施工规格
-hooks/                    # Hook 回调脚本（装到目标项目的 .claude/hooks/）
-  child_signal.js         # Hook 回调 — 写 signal 文件
-  watch_child_stream.js   # 父侧 watcher — 读 signal 目录 emit stdout
-  codex_hook_bridge.js    # Codex notify → child_signal 适配
+comm/                     # launcher + protocol doc + historical specs
+  launch_child.js         # main script: subcommands launch / kill / list / status / send / register
+  CLAUDE.md               # protocol (hook events, signal format, env contract, parent discipline)
+  archive/                # prior wave specs (path references frozen to original project)
+hooks/                    # hook callbacks (installed under target project's .claude/hooks/)
+  child_signal.js         # hook callback — writes signal files
+  watch_child_stream.js   # parent-side watcher — reads signal dir, emits to stdout
+  codex_hook_bridge.js    # Codex notify → child_signal adapter
 codex-config/
-  config.toml.template    # codex 项目级 config.toml 模板
+  config.toml.template    # Codex project-level config.toml template
 examples/
-  settings.local.json.example   # Claude Code hooks 配置示例
-install.js                # 跨平台 Node 安装脚本（copy 到目标项目 .claude/）
+  settings.local.json.example   # Claude Code hooks config sample
+.claude-plugin/           # Claude Code plugin manifest + marketplace
+skills/agent-comm/        # Plugin skill: operator guide for parent agent
+install.js                # cross-platform Node installer
 ```
 
-## 架构
+## Architecture
 
 ```
-父 Claude Code
+Parent Claude Code
   ↓ launch_child.js launch
   psmux / tmux session
-  ↓ 跑子 CLI（claude / codex）
-  ↓ 子进程 hook 触发（Stop / PermissionRequest / StopFailure / Notification）
-  ↓ child_signal.js 写文件
+  ↓ runs child CLI (claude / codex)
+  ↓ child hooks fire (Stop / PermissionRequest / StopFailure / Notification)
+  ↓ child_signal.js writes file
   .claude/signals/child-events/
     {ts}__{session}__{state}__{pid}__{guid}.signal
-  ↓ watcher 读 + unlink
-  Monitor 捕 stdout → task-notification → 父 Opus 醒
+  ↓ watcher reads + unlinks
+  Monitor captures stdout → task-notification → parent Opus wakes
 ```
 
-## 要求
+## Requirements
 
-- **Windows only**（当前版本）：psmux + PowerShell 7 + Node.js 18+
-- 目标项目需支持 Claude Code hooks（settings.local.json）
+- **Windows only** (current release): psmux + PowerShell 7 + Node.js 18+
+- Target project must support Claude Code hooks (`settings.local.json`)
 
-> ⚠️ *nix (tmux + bash) 支持**未实现**；代码路径硬编码 `psmux` + PowerShell。跟进 [issue #N](https://github.com/RockyPeng2026/claude-agent-comm/issues) 或提 PR 加分支。
+> ⚠️ *nix (tmux + bash) support is **not implemented**; code paths are hard-coded to `psmux` + PowerShell. Track via [issues](https://github.com/RockyPeng2026/claude-agent-comm/issues) or submit a PR with the tmux branch.
 
-> 🔐 **凭证处理**：claude runtime 的 env（含 `ANTHROPIC_AUTH_TOKEN`）经 `spawnSync` 的 `env` 选项传给 `psmux new-session --`，再由 psmux → pwsh → claude 进程链继承。**不写磁盘文件，不进 psmux send-keys 文本**。进程列表显示 pwsh/claude 命令行（无 token）。
+> 🔐 **Credentials**: claude runtime env (including `ANTHROPIC_AUTH_TOKEN`) is passed via `spawnSync`'s `env` option to `psmux new-session --`, and inherited down the psmux → pwsh → claude process chain. **No disk file, no psmux send-keys text.** Process listing shows pwsh/claude command lines (no token).
 > 
-> ⚠️ **passthrough 警告**：`launch --session X --model Y <其他 args>` 里所有未知 args 作为 passthrough 拼进 pwsh `-Command` 字符串 → **进入 claude/codex argv → 进程列表可见**。**不要**把 API key、secret、含 PII 的 prompt 以 `--flag value` 形式传给 passthrough；敏感内容改用 `send --text "..."` 在 session 启动后注入（不进 argv）。
+> ⚠️ **passthrough warning**: unknown args after `launch --session X --model Y` are concatenated into the pwsh `-Command` string → **visible in child process argv / process listing**. **Never** put API keys, secrets, or PII-laden prompts into passthrough as `--flag value`. Inject sensitive content via `send --text "..."` after the session is up (not in argv).
 
-## 安装到目标项目
+## Install into a target project
 
 ```
-node install.js /path/to/myproject [--force]
+node install.js /path/to/myproject [--force] [--codex]
 ```
 
-Install 脚本会：
-1. Copy `hooks/*.js` 到 `<target>/.claude/hooks/`
-2. Copy `comm/launch_child.js` 和 `comm/CLAUDE.md` 到 `<target>/.claude/comm/`
-3. 提示用户 merge `settings.local.json.example` 到项目的 `.claude/settings.local.json`
-4. Codex 用户另外 copy `codex-config/config.toml.template` 到 `<target>/.codex/config.toml`
+Options:
+- `--force` overwrite existing files
+- `--codex` also install `.codex/config.toml` with the bridge path auto-resolved (skip manual editing)
 
-## 使用
+The installer copies:
+1. `hooks/*.js` → `<target>/.claude/hooks/`
+2. `comm/launch_child.js` + `CLAUDE.md` → `<target>/.claude/comm/`
+3. (with `--codex`) `.codex/config.toml` with resolved absolute path
+4. Then prompts you to merge `examples/settings.local.json.example` hooks block into your `.claude/settings.local.json` and `.gitignore` `.claude/signals/`.
+
+## As a Claude Code plugin
+
+```
+/plugin install RockyPeng2026/claude-agent-comm
+```
+
+Local development:
+```
+claude --plugin-dir D:/projects/claude-agent-comm
+```
+
+The plugin ships the `agent-comm` skill (`skills/agent-comm/SKILL.md`) that teaches parent Claude agents how to dispatch children, interpret events, and avoid common pitfalls.
+
+## Usage
 
 ```powershell
-# 起子
+# launch
 node .claude/comm/launch_child.js launch --runtime claude --model glm-5.1 --session mywork
 
-# 发 prompt
+# send prompt (auto picks submit key by runtime: claude=Enter, codex=C-m)
 node .claude/comm/launch_child.js send --session mywork --text "hello"
 
-# 看状态
+# status (registry + latest signal)
 node .claude/comm/launch_child.js status --session mywork
 
-# 结束
+# list active children
+node .claude/comm/launch_child.js list
+
+# kill (tombstone → psmux kill → delete registry on success)
 node .claude/comm/launch_child.js kill --session mywork
+
+# register existing psmux session (legacy/hand-built)
+node .claude/comm/launch_child.js register --session oldsess --runtime claude --model glm-5.1
 ```
 
-父侧要配 Monitor 盯 signal 目录（见 `comm/CLAUDE.md` 第 4 节）。
+The parent must also run a watcher via Monitor:
+```
+Monitor { command: "node .claude/hooks/watch_child_stream.js --signalDir .claude/signals/child-events" }
+```
+See `comm/CLAUDE.md` for the full protocol.
 
 ## License
 
-MIT
+[MIT](./LICENSE)
