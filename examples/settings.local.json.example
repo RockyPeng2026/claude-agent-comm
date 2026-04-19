@@ -1,5 +1,12 @@
 {
-  "_comment": "目标项目 .claude/settings.local.json 需要的 hooks 段（合并到已有 settings）",
+  "_comment": "目标项目 .claude/settings.local.json 需要的段（合并到已有 settings）。permissions.allow 豁免框架文件编辑（否则每改一次 .claude/comm/ 或 .claude/hooks/ 都要人工批）",
+  "permissions": {
+    "allow": [
+      "Edit(.claude/comm/**)",
+      "Edit(.claude/hooks/**)",
+      "Read(.claude/signals/**)"
+    ]
+  },
   "hooks": {
     "PermissionRequest": [
       {

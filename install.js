@@ -75,8 +75,9 @@ if (withCodex) {
 console.log('');
 console.log('=== 完成 ===');
 console.log('下一步手动：');
-console.log(`  1. merge ${path.join(src, 'examples', 'settings.local.json.example')} 的 hooks 段到`);
+console.log(`  1. merge ${path.join(src, 'examples', 'settings.local.json.example')} 的 hooks + permissions.allow 段到`);
 console.log(`     ${path.join(dst, '.claude', 'settings.local.json')}`);
+console.log(`     (permissions.allow 里的 Edit(.claude/comm/**) / Edit(.claude/hooks/**) 是为了避免每次改框架文件都弹确认)`);
 if (!withCodex) {
   console.log('  2. Codex 用户跑 --codex 自动装 .codex/config.toml（或手动 copy 模板）');
 }
