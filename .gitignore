@@ -1,0 +1,13 @@
+# Node
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 本地测试残留（运行时 signal / 会话元数据）
+signals/
+sessions/
+
+# 本地 env
+.env
