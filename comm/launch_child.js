@@ -501,7 +501,7 @@ async function cmdRun(subArgs) {
   if (runtime === 'codex') {
     const effectivePassthrough = [...defaultPassthroughForRuntime(runtime, passthrough), ...passthrough];
     cmd = 'codex';
-    args = ['exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--model', model, ...effectivePassthrough, prompt];
+    args = ['exec', '--model', model, ...effectivePassthrough, prompt];
   } else {
     cmd = 'claude';
     args = ['-p', '--model', model, '--dangerously-skip-permissions', ...passthrough, prompt];
