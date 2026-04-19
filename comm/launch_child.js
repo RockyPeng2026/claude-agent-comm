@@ -444,11 +444,17 @@ async function cmdSend(subArgs) {
   if (sk1.status !== 0) { process.stderr.write(`send-keys -l failed (exit ${sk1.status})\n`); process.exit(1); }
 
   // Wait for TTY buffer to flush before hitting submit
-  await new Promise(r => setTimeout(r, 200));
+  const flushMs = reg.runtime === 'codex' ? 500 : 200;
+  await new Promise(r => setTimeout(r, flushMs));
 
   const submitKey = reg.runtime === 'codex' ? 'C-m' : 'Enter';
   const sk2 = spawnSync('psmux', ['send-keys', '-t', sessionName, submitKey], { stdio: 'inherit' });
   if (sk2.status !== 0) { process.stderr.write(`send-keys ${submitKey} failed (exit ${sk2.status})\n`); process.exit(1); }
+
+  if (reg.runtime === 'codex') {
+    await new Promise(r => setTimeout(r, 300));
+    spawnSync('psmux', ['send-keys', '-t', sessionName, submitKey], { stdio: 'inherit' });
+  }
 
   console.log(JSON.stringify({ sent: sessionName }));
 }
