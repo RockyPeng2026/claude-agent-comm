@@ -17,6 +17,53 @@ const SESSIONS_DIR = path.join(PROJECT, '.claude', 'signals', 'sessions');
 
 function esc(s) { return "'" + s.replace(/'/g, "''") + "'"; }
 
+// ─── mux (psmux on Windows, tmux elsewhere) ───
+const MUX = process.platform === 'win32' ? 'psmux' : 'tmux';
+
+function muxLs() {
+  const r = spawnSync(MUX, ['ls'], { encoding: 'utf8' });
+  if (r.status !== 0 || !r.stdout) return new Set();
+  return new Set(r.stdout.trim().split('\n').filter(Boolean).map(l => l.split(':')[0]));
+}
+
+function muxKill(session) {
+  return spawnSync(MUX, ['kill-session', '-t', session], { stdio: 'inherit' });
+}
+
+function muxCapture(session, scrollback) {
+  const args = ['capture-pane', '-t', session, '-p'];
+  if (scrollback && scrollback > 0) { args.push('-S', `-${scrollback}`); }
+  return spawnSync(MUX, args, { encoding: 'utf8' });
+}
+
+function muxNewSessionDetached(session, cmd, cmdArgs, env) {
+  return spawnSync(
+    MUX,
+    ['new-session', '-d', '-s', session, '--', cmd, ...cmdArgs],
+    { stdio: 'inherit', env }
+  );
+}
+
+// Paste text via bracketed paste, then submit with a clean Enter.
+// 为什么这样稳：
+//   - tmux paste-buffer -p 在 pane 处于 MODE_BRACKETPASTE 时发 ESC[200~..ESC[201~
+//   - codex TUI 开 EnableBracketedPaste（tui.rs::set_modes），crossterm 把它解析成
+//     Event::Paste → handle_paste() 走结构化路径 + clear_after_explicit_paste()
+//   - paste_burst 状态清掉后，紧跟的 send-keys Enter 是干净 KeyCode::Enter，直接 submit
+//   - claude TUI 同样支持 bracketed paste，统一这条路径不挑 runtime
+function muxPasteAndSubmit(session, text) {
+  const bufName = `in_${session}`;
+  const load = spawnSync(MUX, ['load-buffer', '-b', bufName, '-'], {
+    input: text, stdio: ['pipe', 'inherit', 'inherit']
+  });
+  if (load.status !== 0) return { ok: false, step: 'load-buffer', status: load.status };
+  const paste = spawnSync(MUX, ['paste-buffer', '-d', '-p', '-b', bufName, '-t', session], { stdio: 'inherit' });
+  if (paste.status !== 0) return { ok: false, step: 'paste-buffer', status: paste.status };
+  const enter = spawnSync(MUX, ['send-keys', '-t', session, 'Enter'], { stdio: 'inherit' });
+  if (enter.status !== 0) return { ok: false, step: 'send-keys Enter', status: enter.status };
+  return { ok: true };
+}
+
 // ─── shared ───
 
 const SESSION_NAME_RE = /^[A-Za-z0-9._-]+$/;
@@ -83,12 +130,6 @@ function readRegistry(session) {
     process.exit(1);
   }
   return JSON.parse(fs.readFileSync(p, 'utf8'));
-}
-
-function psmuxLs() {
-  const r = spawnSync('psmux', ['ls'], { encoding: 'utf8' });
-  if (r.status !== 0 || !r.stdout) return new Set();
-  return new Set(r.stdout.trim().split('\n').filter(Boolean).map(l => l.split(':')[0]));
 }
 
 function atomicWrite(filePath, data) {
@@ -176,9 +217,9 @@ function cmdRegister(subArgs) {
   if (!sessionName) { process.stderr.write('register requires --session\n'); process.exit(1); }
   if (!runtime) { process.stderr.write('register requires --runtime\n'); process.exit(1); }
 
-  const alive = psmuxLs();
+  const alive = muxLs();
   if (!alive.has(sessionName)) {
-    process.stderr.write(`session "${sessionName}" not found in psmux\n`);
+    process.stderr.write('session "' + sessionName + '" not found in ' + MUX + '\n');
     process.exit(1);
   }
 
@@ -260,10 +301,10 @@ function cmdLaunch(subArgs) {
   const signalDir = path.join(PROJECT, '.claude', 'signals', 'child-events');
 
   // Pre-check: reject if same-name psmux session already exists (hand-built or legacy)
-  const existing = psmuxLs();
+  const existing = muxLs();
   if (existing.has(sessionName)) {
     process.stderr.write(
-      `session "${sessionName}" already exists in psmux; if you want to attach framework, run:\n` +
+      `session "${sessionName}" already exists in ${MUX}; if you want to attach framework, run:\n` +
       `  launch_child.js register --session ${sessionName} --runtime ${runtime}\n`
     );
     process.exit(1);
@@ -275,11 +316,15 @@ function cmdLaunch(subArgs) {
   // Step 1: Build pwsh command (NO secrets typed — env comes via process inheritance)
   let pwshCmd;
   if (runtime === 'codex') {
+    // bridge 路径：plugin 里 hooks/codex_hook_bridge.js（相对 launch_child.js 在 comm/）
+    const bridgeScript = path.resolve(__dirname, '..', 'hooks', 'codex_hook_bridge.js');
+    const bridgeForToml = bridgeScript.replace(/\\/g, '/');
+    const notifyArg = `-c notify=["node","${bridgeForToml}"]`;
     const childSignalScript = path.join(PROJECT, '.claude', 'hooks', 'child_signal.js');
     const failGuard = `if ($LASTEXITCODE -ne 0) { node ${esc(childSignalScript)} --state stop_failure }`;
     pwshCmd =
       `Set-Location ${esc(PROJECT)} -ErrorAction Stop; ` +
-      `try { codex --dangerously-bypass-approvals-and-sandbox --model ${esc(model)}` +
+      `try { codex --dangerously-bypass-approvals-and-sandbox --model ${esc(model)} ${notifyArg}` +
       (effectivePassthrough.length ? ' ' + effectivePassthrough.map(esc).join(' ') : '') +
       `; ${failGuard} } catch { node ${esc(childSignalScript)} --state stop_failure }`;
   } else {
@@ -321,19 +366,19 @@ function cmdLaunch(subArgs) {
     process.exit(1);
   }
 
-  // Step 4: Create psmux session with the command — one shot, no send-keys chain needed
-  const ns = spawnSync(
-    'psmux',
-    ['new-session', '-d', '-s', sessionName, '--', 'pwsh', '-NoProfile', '-Command', pwshCmd],
-    { stdio: 'inherit', env: childEnv }
-  );
+  // Step 4: Create mux session with the command — one shot
+  const childCmd = process.platform === 'win32' ? 'pwsh' : 'bash';
+  const childCmdArgs = process.platform === 'win32'
+    ? ['-NoProfile', '-Command', pwshCmd]
+    : ['-lc', pwshCmd];
+  const ns = muxNewSessionDetached(sessionName, childCmd, childCmdArgs, childEnv);
   if (ns.status !== 0) {
     try { fs.unlinkSync(regPath); } catch {}
-    process.stderr.write(`psmux new-session failed (exit ${ns.status})\n`);
+    process.stderr.write(`${MUX} new-session failed (exit ${ns.status})\n`);
     process.exit(1);
   }
 
-  console.log(JSON.stringify({ session: sessionName, runtime, model, attach_cmd: `psmux attach -t ${sessionName}` }));
+  console.log(JSON.stringify({ session: sessionName, runtime, model, attach_cmd: `${MUX} attach -t ${sessionName}` }));
 }
 
 // ─── kill ───
@@ -360,7 +405,7 @@ function cmdKill(subArgs) {
   });
 
   // Kill psmux session (best-effort — may already be dead)
-  const r = spawnSync('psmux', ['kill-session', '-t', sessionName], { stdio: 'inherit' });
+  const r = muxKill(sessionName);
   if (r.status !== 0) {
     // Don't delete registry — session might still be alive (would become orphan)
     process.stderr.write(`kill-session exit ${r.status}, keeping registry\n`);
@@ -376,7 +421,7 @@ function cmdKill(subArgs) {
 function cmdList() {
   fs.mkdirSync(SESSIONS_DIR, { recursive: true });
   const files = fs.readdirSync(SESSIONS_DIR).filter(f => f.endsWith('.json') && !f.endsWith('.tombstone.json'));
-  const alive = psmuxLs();
+  const alive = muxLs();
   const entries = files.map(f => {
     const data = JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, f), 'utf8'));
     data.alive = alive.has(data.session);
@@ -413,7 +458,7 @@ function cmdStatus(subArgs) {
     }
   } catch {}
 
-  const alive = psmuxLs();
+  const alive = muxLs();
   console.log(JSON.stringify({ ...reg, alive: alive.has(sessionName), last_event_state, last_event_at }));
 }
 
@@ -440,20 +485,10 @@ async function cmdSend(subArgs) {
 
   const reg = readRegistry(sessionName);
 
-  const sk1 = spawnSync('psmux', ['send-keys', '-t', sessionName, '-l', text], { stdio: 'inherit' });
-  if (sk1.status !== 0) { process.stderr.write(`send-keys -l failed (exit ${sk1.status})\n`); process.exit(1); }
-
-  // Wait for TTY buffer to flush before hitting submit
-  const flushMs = reg.runtime === 'codex' ? 500 : 200;
-  await new Promise(r => setTimeout(r, flushMs));
-
-  const submitKey = reg.runtime === 'codex' ? 'C-m' : 'Enter';
-  const sk2 = spawnSync('psmux', ['send-keys', '-t', sessionName, submitKey], { stdio: 'inherit' });
-  if (sk2.status !== 0) { process.stderr.write(`send-keys ${submitKey} failed (exit ${sk2.status})\n`); process.exit(1); }
-
-  if (reg.runtime === 'codex') {
-    await new Promise(r => setTimeout(r, 300));
-    spawnSync('psmux', ['send-keys', '-t', sessionName, submitKey], { stdio: 'inherit' });
+  const res = muxPasteAndSubmit(sessionName, text);
+  if (!res.ok) {
+    process.stderr.write(`${MUX} ${res.step} failed (exit ${res.status})\n`);
+    process.exit(1);
   }
 
   console.log(JSON.stringify({ sent: sessionName }));
@@ -538,7 +573,7 @@ async function cmdRun(subArgs) {
   const bootMarker = runtime === 'codex' ? '›' : '❯';
   for (let i = 0; i < 10; i++) {
     await new Promise(r => setTimeout(r, 300));
-    const cap = spawnSync('psmux', ['capture-pane', '-t', sessionName, '-p'], { encoding: 'utf8' });
+    const cap = muxCapture(sessionName);
     if (cap.stdout && cap.stdout.includes(bootMarker)) break;
   }
 
@@ -563,7 +598,7 @@ async function cmdRun(subArgs) {
   ];
   const fatalTimer = setTimeout(() => {
     if (terminated) return;
-    const capRes = spawnSync('psmux', ['capture-pane', '-t', sessionName, '-p'], { encoding: 'utf8' });
+    const capRes = muxCapture(sessionName);
     const pane = capRes.stdout || '';
     // 只扫 claude 输出行（● 开头或 错误标识），不扫用户 prompt（❯ 开头）
     const lines = pane.split('\n').filter(l => !/^❯\s*/.test(l));
@@ -600,7 +635,7 @@ async function cmdRun(subArgs) {
   // Step 5: extract result
   let extract_source = 'pane_full_fallback';
   let result = '';
-  const cap = spawnSync('psmux', ['capture-pane', '-t', sessionName, '-p', '-S', '-500'], { encoding: 'utf8' });
+  const cap = muxCapture(sessionName, 500);
   if (cap.stdout) {
     if (runtime === 'claude') {
       // Heuristic: find last `●` to `❯` segment
@@ -643,7 +678,7 @@ async function cmdRun(subArgs) {
   };
   if (timed_out || final_state === 'stop_failure' || fatalDetected) {
     try {
-      const capRes = spawnSync('psmux', ['capture-pane', '-t', sessionName, '-p', '-S', '-200'], { encoding: 'utf8' });
+      const capRes = muxCapture(sessionName, 200);
       out.error_excerpt = (capRes.stdout || '').split('\n').slice(-40).join('\n').trim();
     } catch {}
     if (fatalDetected) out.fatal_excerpt = fatalExcerpt;
