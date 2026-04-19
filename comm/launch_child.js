@@ -7,7 +7,7 @@ function resolveProject() {
   if (process.env.CLAUDE_PROJECT_DIR) return process.env.CLAUDE_PROJECT_DIR;
   const cwd = process.cwd();
   // cwd 不是 plugin cache 目录时才用（plugin 模式下 cwd 可能是目标项目，也可能就是 launcher 目录）
-  if (!cwd.includes('.claude/plugins/cache/') && !cwd.includes('.claude\plugins\cache\')) return cwd;
+  if (!cwd.includes('.claude/plugins/cache/') && !cwd.includes('.claude\\plugins\\cache\\')) return cwd;
   // fallback: __dirname 推断
   if (path.basename(path.dirname(__dirname)) === '.claude') return path.resolve(__dirname, '..', '..');
   return path.resolve(__dirname, '..');
