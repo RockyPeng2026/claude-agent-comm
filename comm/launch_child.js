@@ -217,10 +217,6 @@ function cmdRegister(subArgs) {
 // ─── launch ───
 
 function cmdLaunch(subArgs) {
-  if (process.env.TMUX || process.env.PSMUX) {
-    process.stderr.write('nested psmux/tmux not supported — refusing to new-session inside an existing multiplexer\n');
-    process.exit(1);
-  }
   let model = null, runtime = 'claude';
   let sessionName = `child-${Math.floor(Date.now() / 1000)}`;
   const passthrough = [];
