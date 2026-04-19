@@ -2,14 +2,17 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
-// PROJECT = target project root. 决定 .claude/signals/ 存哪、子进程 cwd 去哪。
-// 优先 CLAUDE_PROJECT_DIR（Claude Code hook 默认提供），否则从 launch_child.js 位置推：
-//   - 装到目标项目：<target>/.claude/comm/launch_child.js → 向上 2 级 = <target>
-//   - repo dogfood：<repo>/comm/launch_child.js → 向上 1 级 = <repo>
-const PROJECT = process.env.CLAUDE_PROJECT_DIR
-  || (path.basename(path.dirname(__dirname)) === '.claude'
-        ? path.resolve(__dirname, '..', '..')
-        : path.resolve(__dirname, '..'));
+// PROJECT 解析优先级：CLAUDE_PROJECT_DIR（最可靠）> process.cwd()（Bash tool 正常） > __dirname 推断（最后兜底）
+function resolveProject() {
+  if (process.env.CLAUDE_PROJECT_DIR) return process.env.CLAUDE_PROJECT_DIR;
+  const cwd = process.cwd();
+  // cwd 不是 plugin cache 目录时才用（plugin 模式下 cwd 可能是目标项目，也可能就是 launcher 目录）
+  if (!cwd.includes('.claude/plugins/cache/') && !cwd.includes('.claude\plugins\cache\')) return cwd;
+  // fallback: __dirname 推断
+  if (path.basename(path.dirname(__dirname)) === '.claude') return path.resolve(__dirname, '..', '..');
+  return path.resolve(__dirname, '..');
+}
+const PROJECT = resolveProject();
 const SESSIONS_DIR = path.join(PROJECT, '.claude', 'signals', 'sessions');
 
 function esc(s) { return "'" + s.replace(/'/g, "''") + "'"; }
