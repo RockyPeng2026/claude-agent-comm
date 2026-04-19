@@ -54,8 +54,8 @@ function hasArg(args, name) {
   return args.includes(name) || args.some(a => a.startsWith(`${name}=`));
 }
 function defaultPassthroughForRuntime(runtime, args) {
-  if (runtime === 'codex' && !hasArg(args, '--reasoning-effort')) {
-    return ['--reasoning-effort', 'high'];
+  if (runtime === 'codex' && !hasArg(args, '-c') && !args.some(a => a.includes('model_reasoning_effort'))) {
+    return ['-c', 'model_reasoning_effort=high'];
   }
   return [];
 }
@@ -70,7 +70,7 @@ function usage() {
     '  status    --session NAME\n' +
     '  send      --session NAME --text "..."\n' +
     '  run       --runtime X [--model Y] [--session N] [--out FILE] [--events-file F] [--timeout-ms N] [--keep] -- PROMPT...\n' +
-    '    default: codex=gpt-5.4 + --reasoning-effort high; claude=glm-5.1(proxy) | claude-opus-4-7(oauth)'
+    '    default: codex=gpt-5.4 + -c model_reasoning_effort=high; claude=glm-5.1(proxy) | claude-opus-4-7(oauth)'
   );
   process.exit(1);
 }
