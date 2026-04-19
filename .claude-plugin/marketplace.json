@@ -1,0 +1,14 @@
+{
+  "name": "agent-comm",
+  "owner": {
+    "name": "RockyPeng2026",
+    "url": "https://github.com/RockyPeng2026"
+  },
+  "plugins": [
+    {
+      "name": "agent-comm",
+      "source": "./",
+      "description": "父子 Claude Code agent 通信框架：psmux + CLI hook + subcommand 编排，事件驱动子 agent 管理"
+    }
+  ]
+}

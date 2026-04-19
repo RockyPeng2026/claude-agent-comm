@@ -16,30 +16,32 @@ description: Use this skill when user wants to spawn a child Claude/Codex agent 
 ## 前置检查
 
 父 agent 任何动作前确认：
-- Monitor 已挂 watcher：`Monitor { command: "node <project>/.claude/hooks/watch_child_stream.js --signalDir <project>/.claude/signals/child-events" }`（persistent 模式）
+- Monitor 已挂 watcher：`Monitor { command: "node ${CLAUDE_PLUGIN_ROOT}/hooks/watch_child_stream.js --signalDir <project>/.claude/signals/child-events" }`（persistent 模式；`<project>` 是**父 agent 所在项目**的绝对路径）
 - `.env` 已 source 到环境（对 claude runtime 必需：`ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` / `API_TIMEOUT_MS`）
 
 ## 子命令一览
 
 ```bash
+LAUNCHER="${CLAUDE_PLUGIN_ROOT}/comm/launch_child.js"   # 仅在 plugin 模式下如此；如用 install.js 装到目标项目则是 $CLAUDE_PROJECT_DIR/.claude/comm/launch_child.js
+
 # 起子（psmux 创建 + registry 写 + env 注入 + cmd 构造）
-node <project>/.claude/comm/launch_child.js launch \
+node $LAUNCHER launch \
   --runtime {claude|codex} --model MODEL [--session NAME] [其他 passthrough...]
 
 # 发 prompt（自动按 runtime 选 submit key：claude=Enter, codex=C-m）
-node <project>/.claude/comm/launch_child.js send --session NAME --text "prompt"
+node ${CLAUDE_PLUGIN_ROOT}/comm/launch_child.js send --session NAME --text "prompt"
 
 # 查状态（registry + 最新 signal）
-node <project>/.claude/comm/launch_child.js status --session NAME
+node ${CLAUDE_PLUGIN_ROOT}/comm/launch_child.js status --session NAME
 
 # 列活子
-node <project>/.claude/comm/launch_child.js list
+node ${CLAUDE_PLUGIN_ROOT}/comm/launch_child.js list
 
 # 结束（先 tombstone 再 psmux kill 再删 registry）
-node <project>/.claude/comm/launch_child.js kill --session NAME
+node ${CLAUDE_PLUGIN_ROOT}/comm/launch_child.js kill --session NAME
 
 # 给已有 psmux session 补 registry（遗留/手建的）
-node <project>/.claude/comm/launch_child.js register \
+node ${CLAUDE_PLUGIN_ROOT}/comm/launch_child.js register \
   --session NAME --runtime {claude|codex} [--model M] [--force]
 ```
 

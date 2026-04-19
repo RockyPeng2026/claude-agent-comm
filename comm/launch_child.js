@@ -232,30 +232,42 @@ function cmdLaunch(subArgs) {
     process.exit(1);
   }
 
-  // Step 3: Build command per runtime
+  // Step 3: Write session env to a temp .ps1 (source + delete before child starts).
+  // 避免 ANTHROPIC_* 明文进 psmux send-keys → pane scrollback 泄露。
+  const envDir = path.join(PROJECT, '.claude', 'signals', 'session-env');
+  fs.mkdirSync(envDir, { recursive: true });
+  const envFile = path.join(envDir, `${sessionName}.ps1`);
+  const envLines = [
+    `$env:CLAUDE_CHILD_HOOKS='1'`,
+    `$env:CLAUDE_CHILD_SESSION=${esc(sessionName)}`,
+    `$env:CLAUDE_CHILD_SIGNAL_DIR=${esc(signalDir)}`,
+    `$env:CLAUDE_PROJECT_DIR=${esc(PROJECT)}`,
+  ];
+  if (runtime === 'claude') {
+    envLines.push(
+      `$env:ANTHROPIC_AUTH_TOKEN=${esc(process.env.ANTHROPIC_AUTH_TOKEN || '')}`,
+      `$env:ANTHROPIC_BASE_URL=${esc(process.env.ANTHROPIC_BASE_URL || '')}`,
+      `$env:API_TIMEOUT_MS=${esc(process.env.API_TIMEOUT_MS || '')}`,
+    );
+  }
+  fs.writeFileSync(envFile, envLines.join('\r\n') + '\r\n', { mode: 0o600 });
+
+  // Step 4: Build command per runtime — typed text only references envFile path, no secrets
   let cmdLine;
+  const envStanza = `. ${esc(envFile)}; Remove-Item -Force ${esc(envFile)}; `;
   if (runtime === 'codex') {
     const childSignalScript = path.join(PROJECT, '.claude', 'hooks', 'child_signal.js');
     const failGuard = `if ($LASTEXITCODE -ne 0) { node ${esc(childSignalScript)} --state stop_failure }`;
     cmdLine =
       `Set-Location ${esc(PROJECT)} -ErrorAction Stop; ` +
-      `$env:CLAUDE_CHILD_HOOKS='1'; ` +
-      `$env:CLAUDE_CHILD_SESSION=${esc(sessionName)}; ` +
-      `$env:CLAUDE_CHILD_SIGNAL_DIR=${esc(signalDir)}; ` +
-      `$env:CLAUDE_PROJECT_DIR=${esc(PROJECT)}; ` +
+      envStanza +
       `try { codex --dangerously-bypass-approvals-and-sandbox --model ${esc(model)}` +
       (passthrough.length ? ' ' + passthrough.map(esc).join(' ') : '') +
       `; ${failGuard} } catch { node ${esc(childSignalScript)} --state stop_failure }`;
   } else {
     cmdLine =
       `Set-Location ${esc(PROJECT)} -ErrorAction Stop; ` +
-      `$env:CLAUDE_CHILD_HOOKS='1'; ` +
-      `$env:CLAUDE_CHILD_SESSION=${esc(sessionName)}; ` +
-      `$env:CLAUDE_CHILD_SIGNAL_DIR=${esc(signalDir)}; ` +
-      `$env:CLAUDE_PROJECT_DIR=${esc(PROJECT)}; ` +
-      `$env:ANTHROPIC_AUTH_TOKEN=${esc(process.env.ANTHROPIC_AUTH_TOKEN)}; ` +
-      `$env:ANTHROPIC_BASE_URL=${esc(process.env.ANTHROPIC_BASE_URL)}; ` +
-      `$env:API_TIMEOUT_MS=${esc(process.env.API_TIMEOUT_MS)}; ` +
+      envStanza +
       `claude --model ${esc(model)} --dangerously-skip-permissions` +
       (passthrough.length ? ' ' + passthrough.map(esc).join(' ') : '');
   }
@@ -269,6 +281,7 @@ function cmdLaunch(subArgs) {
   } catch (e) {
     spawnSync('psmux', ['kill-session', '-t', sessionName]);
     try { fs.unlinkSync(regPath); } catch {}
+    try { fs.unlinkSync(envFile); } catch {}
     process.stderr.write(`${e.message}\n`);
     process.exit(1);
   }

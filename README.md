@@ -37,9 +37,12 @@ install.js                # 跨平台 Node 安装脚本（copy 到目标项目 .
 
 ## 要求
 
-- Windows: psmux + PowerShell 7 + Node.js 18+
-- \*nix: tmux + bash + Node.js 18+
+- **Windows only**（当前版本）：psmux + PowerShell 7 + Node.js 18+
 - 目标项目需支持 Claude Code hooks（settings.local.json）
+
+> ⚠️ *nix (tmux + bash) 支持**未实现**；代码路径硬编码 `psmux` + PowerShell。跟进 [issue #N](https://github.com/RockyPeng2026/claude-agent-comm/issues) 或提 PR 加分支。
+
+> 🔐 **alpha 阶段安全提示**：当前 claude runtime 启动时会把 `ANTHROPIC_AUTH_TOKEN` 拼进 psmux `send-keys` 文本（泄露到 pane scrollback）。生产凭证**不要**放进 `.env`，只用 z.ai 代理或测试 key。修复在路上（issue #N）。
 
 ## 安装到目标项目
 
