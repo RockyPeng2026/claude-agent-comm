@@ -16,3 +16,6 @@ sessions/
 
 # 本地 env
 .env
+
+# 仅 Claude Code 识别的开发工具文档，不入库
+CLAUDE.md
