@@ -71,6 +71,7 @@ node ${CLAUDE_PLUGIN_ROOT}/comm/launch_child.js register \
 - **不要**编辑 signal 文件。watcher 会秒删
 - **不要**两个父并发 watch 同一 signal 目录（emit+delete 假设单消费者）
 - **不要**在子 session 里直接 `attach` 交互（除非 debug）— 你用 send/status/kill 指挥
+- **不要**把 secret 通过 passthrough args 传给 launch（会进 claude/codex 进程 argv → 进程列表可见）。敏感内容走 `send --text` 启动后注入
 
 ## 常见坑
 

@@ -27,7 +27,8 @@ function assertValidSessionName(value, flagName) {
 function sessionPath(session, suffix) {
   // suffix: '.json' | '.tombstone.json'
   const target = path.resolve(SESSIONS_DIR, `${session}${suffix}`);
-  if (!target.startsWith(SESSIONS_DIR + path.sep) && target !== path.join(SESSIONS_DIR, `${session}${suffix}`)) {
+  const rel = path.relative(SESSIONS_DIR, target);
+  if (rel.startsWith('..') || path.isAbsolute(rel)) {
     process.stderr.write(`session name "${session}" resolves outside sessions dir\n`);
     process.exit(1);
   }
@@ -259,15 +260,17 @@ function cmdLaunch(subArgs) {
       (passthrough.length ? ' ' + passthrough.map(esc).join(' ') : '');
   }
 
-  // Step 2: Prepare child env (ANTHROPIC_* / CLAUDE_CHILD_* passed via spawnSync env,
-  // NOT typed into pane; psmux new-session inherits env → pwsh inherits → claude/codex inherits)
-  const childEnv = {
-    ...process.env,
-    CLAUDE_CHILD_HOOKS: '1',
-    CLAUDE_CHILD_SESSION: sessionName,
-    CLAUDE_CHILD_SIGNAL_DIR: signalDir,
-    CLAUDE_PROJECT_DIR: PROJECT,
-  };
+  // Step 2: Prepare child env (only expose ANTHROPIC_* to claude runtime; codex 走自己的 OAuth)
+  const childEnv = { ...process.env };
+  childEnv.CLAUDE_CHILD_HOOKS = '1';
+  childEnv.CLAUDE_CHILD_SESSION = sessionName;
+  childEnv.CLAUDE_CHILD_SIGNAL_DIR = signalDir;
+  childEnv.CLAUDE_PROJECT_DIR = PROJECT;
+  if (runtime === 'codex') {
+    delete childEnv.ANTHROPIC_AUTH_TOKEN;
+    delete childEnv.ANTHROPIC_BASE_URL;
+    delete childEnv.API_TIMEOUT_MS;
+  }
 
   // Step 3: Write registry BEFORE session starts (watcher needs it to accept first signal).
   // 不持久化 passthrough 原值（可能含 key / PII），仅记计数。

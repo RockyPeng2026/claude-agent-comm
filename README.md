@@ -42,7 +42,9 @@ install.js                # 跨平台 Node 安装脚本（copy 到目标项目 .
 
 > ⚠️ *nix (tmux + bash) 支持**未实现**；代码路径硬编码 `psmux` + PowerShell。跟进 [issue #N](https://github.com/RockyPeng2026/claude-agent-comm/issues) 或提 PR 加分支。
 
-> 🔐 **凭证处理**：claude runtime 的 env（含 `ANTHROPIC_AUTH_TOKEN`）经 `spawnSync` 的 `env` 选项传给 `psmux new-session --`，再由 psmux → pwsh → claude 进程链继承。**不写磁盘文件，不进 psmux send-keys 文本**。进程列表会显示 pwsh/claude 命令行（无 token）。
+> 🔐 **凭证处理**：claude runtime 的 env（含 `ANTHROPIC_AUTH_TOKEN`）经 `spawnSync` 的 `env` 选项传给 `psmux new-session --`，再由 psmux → pwsh → claude 进程链继承。**不写磁盘文件，不进 psmux send-keys 文本**。进程列表显示 pwsh/claude 命令行（无 token）。
+> 
+> ⚠️ **passthrough 警告**：`launch --session X --model Y <其他 args>` 里所有未知 args 作为 passthrough 拼进 pwsh `-Command` 字符串 → **进入 claude/codex argv → 进程列表可见**。**不要**把 API key、secret、含 PII 的 prompt 以 `--flag value` 形式传给 passthrough；敏感内容改用 `send --text "..."` 在 session 启动后注入（不进 argv）。
 
 ## 安装到目标项目
 

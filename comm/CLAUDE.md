@@ -109,7 +109,7 @@ node $codex result $taskId
 ```
 node launch_child.js launch --runtime {claude|codex} --session NAME --model X
 ```
-顺序：psmux 同名检测 → new-session → 原子写 registry（tmp+rename）→ send-keys 启动子进程。同名 psmux session 已存在时拒绝并提示 `register`。Registry 先于子进程落盘，watcher 从第一个 signal 起就能匹配。
+顺序：psmux 同名检测 → 清 stale tombstone → 原子写 registry（tmp+rename）→ `psmux new-session -- pwsh -NoProfile -Command "..."` 一步启动子进程，env 经 spawnSync env 选项传入（ANTHROPIC_* 只对 claude 分支暴露，codex 分支删掉）。同名 psmux session 已存在时拒绝并提示 `register`。Registry 先于子进程落盘，watcher 从第一个 signal 起就能匹配。**无 send-keys，无 session-env 磁盘文件**。
 
 ### `kill`
 ```
