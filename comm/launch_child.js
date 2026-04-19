@@ -40,16 +40,34 @@ function clearStaleTombstone(session) {
   try { fs.unlinkSync(tombPath); } catch (e) { if (e.code !== 'ENOENT') throw e; }
 }
 
+function isClaudeProxyMode() {
+  return Boolean(process.env.ANTHROPIC_BASE_URL);
+}
+function defaultModelForRuntime(runtime) {
+  if (runtime === 'codex') return 'gpt-5.4';
+  return isClaudeProxyMode() ? 'glm-5.1' : 'claude-opus-4-7';
+}
+function hasArg(args, name) {
+  return args.includes(name) || args.some(a => a.startsWith(`${name}=`));
+}
+function defaultPassthroughForRuntime(runtime, args) {
+  if (runtime === 'codex' && !hasArg(args, '--reasoning-effort')) {
+    return ['--reasoning-effort', 'high'];
+  }
+  return [];
+}
+
 function usage() {
   process.stderr.write(
     'Usage: node launch_child.js <subcommand> [options]\n' +
-    '  launch    --runtime {claude|codex} --session NAME --model X\n' +
+    '  launch    --runtime {claude|codex} --session NAME [--model X]\n' +
     '  register  --session NAME --runtime {claude|codex} [--model M] [--pid N] [--parent P] [--force]\n' +
     '  kill      --session NAME\n' +
     '  list\n' +
     '  status    --session NAME\n' +
     '  send      --session NAME --text "..."\n' +
-    '  run       --runtime X --model Y [--session N] [--out FILE] [--events-file F] [--timeout-ms N] [--keep] -- PROMPT...'
+    '  run       --runtime X [--model Y] [--session N] [--out FILE] [--events-file F] [--timeout-ms N] [--keep] -- PROMPT...\n' +
+    '    default: codex=gpt-5.4 + --reasoning-effort high; claude=glm-5.1(proxy) | claude-opus-4-7(oauth)'
   );
   process.exit(1);
 }
@@ -196,7 +214,7 @@ function cmdRegister(subArgs) {
 // ─── launch ───
 
 function cmdLaunch(subArgs) {
-  let model = 'glm-5.1', runtime = 'claude';
+  let model = null, runtime = 'claude';
   let sessionName = `child-${Math.floor(Date.now() / 1000)}`;
   const passthrough = [];
 
@@ -221,13 +239,20 @@ function cmdLaunch(subArgs) {
   }
 
   if (runtime === 'claude') {
-    const required = ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'API_TIMEOUT_MS'];
-    const missing = required.filter(k => !process.env[k]);
-    if (missing.length) {
-      process.stderr.write(`missing env: ${missing}\n`);
-      process.exit(1);
+    // 仅当使用 z.ai 代理（ANTHROPIC_BASE_URL 非空）时要求 AUTH_TOKEN + API_TIMEOUT_MS；
+    // 官方 OAuth（sonnet/opus 原生）无需 env。
+    if (process.env.ANTHROPIC_BASE_URL) {
+      const required = ['ANTHROPIC_AUTH_TOKEN', 'API_TIMEOUT_MS'];
+      const missing = required.filter(k => !process.env[k]);
+      if (missing.length) {
+        process.stderr.write(`missing env: ${missing} (required when ANTHROPIC_BASE_URL set for proxy mode)\n`);
+        process.exit(1);
+      }
     }
   }
+
+  model = model || defaultModelForRuntime(runtime);
+  const effectivePassthrough = [...defaultPassthroughForRuntime(runtime, passthrough), ...passthrough];
 
   const signalDir = path.join(PROJECT, '.claude', 'signals', 'child-events');
 
@@ -252,13 +277,13 @@ function cmdLaunch(subArgs) {
     pwshCmd =
       `Set-Location ${esc(PROJECT)} -ErrorAction Stop; ` +
       `try { codex --dangerously-bypass-approvals-and-sandbox --model ${esc(model)}` +
-      (passthrough.length ? ' ' + passthrough.map(esc).join(' ') : '') +
+      (effectivePassthrough.length ? ' ' + effectivePassthrough.map(esc).join(' ') : '') +
       `; ${failGuard} } catch { node ${esc(childSignalScript)} --state stop_failure }`;
   } else {
     pwshCmd =
       `Set-Location ${esc(PROJECT)} -ErrorAction Stop; ` +
       `claude --model ${esc(model)} --dangerously-skip-permissions` +
-      (passthrough.length ? ' ' + passthrough.map(esc).join(' ') : '');
+      (effectivePassthrough.length ? ' ' + effectivePassthrough.map(esc).join(' ') : '');
   }
 
   // Step 2: Prepare child env (only expose ANTHROPIC_* to claude runtime; codex 走自己的 OAuth)
@@ -279,7 +304,7 @@ function cmdLaunch(subArgs) {
   const regData = {
     session: sessionName, runtime, model,
     pid: process.pid, signal_dir: signalDir,
-    passthrough_count: passthrough.length,
+    passthrough_count: effectivePassthrough.length,
     started_at: new Date().toISOString()
   };
   try {
@@ -447,7 +472,7 @@ async function cmdRun(subArgs) {
   if (!runtime || (runtime !== 'claude' && runtime !== 'codex')) {
     process.stderr.write('run requires --runtime {claude|codex}\n'); process.exit(1);
   }
-  if (!model) { process.stderr.write('run requires --model\n'); process.exit(1); }
+  if (!model) model = defaultModelForRuntime(runtime);
   if (!prompt || !prompt.trim()) { process.stderr.write('run requires PROMPT after --\n'); process.exit(1); }
 
   if (!sessionName) {

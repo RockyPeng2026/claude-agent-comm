@@ -80,6 +80,18 @@ node ${CLAUDE_PLUGIN_ROOT}/comm/launch_child.js register \
 - **Codex submit race**：send 子命令已内置 200ms buffer flush。如果偶发 prompt 不提交，手动补 `psmux send-keys -t NAME C-m`
 - **Send 的 --text 不能含裸 `--` 开头的 token**：会被 arg parser 吞。用 `--text=--foo` 或包在引号里
 
+## 模型选择（首次使用先看，别猜）
+
+| runtime | 条件 | 默认值 | 有效模型 |
+|---|---|---|---|
+| codex | ChatGPT OAuth | gpt-5.4 + --reasoning-effort high | gpt-5.4 / gpt-5.4-mini / gpt-5.2 / gpt-5.2-codex / gpt-5.3-codex |
+| claude | ANTHROPIC_BASE_URL 已设（z.ai） | glm-5.1 | glm-5.1 |
+| claude | 官方 OAuth（未设 ANTHROPIC_BASE_URL） | claude-opus-4-7 | claude-opus-4-7 / claude-sonnet-4-5 / claude-haiku-4-5-20251001 |
+
+- 用户显式传 --model 时优先级最高。
+- 首次调用 run/launch，优先省略 --model，让框架按 runtime + env 自动补。
+- 不要给 --runtime codex 传 o4-mini。
+
 ## runtime 差异
 
 | 项 | claude | codex |
