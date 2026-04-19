@@ -9,5 +9,10 @@ Thumbs.db
 signals/
 sessions/
 
+# Dogfood：在自身 repo 内跑 launch_child.js 会 install 到 .claude/ 并产出 .codex/
+# 这些是运行时副本 / 配置，源码在 comm/ hooks/ codex-config/，不入库避免重复
+.claude/
+.codex/
+
 # 本地 env
 .env
