@@ -17,8 +17,7 @@ codex-config/
   config.toml.template    # codex 项目级 config.toml 模板
 examples/
   settings.local.json.example   # Claude Code hooks 配置示例
-install.ps1               # Windows 安装脚本（copy 到目标项目 .claude/）
-install.sh                # *nix 安装脚本
+install.js                # 跨平台 Node 安装脚本（copy 到目标项目 .claude/）
 ```
 
 ## 架构
@@ -44,12 +43,8 @@ install.sh                # *nix 安装脚本
 
 ## 安装到目标项目
 
-```powershell
-# Windows
-.\install.ps1 -TargetProject D:/myproject
-
-# Linux/Mac
-./install.sh /path/to/myproject
+```
+node install.js /path/to/myproject [--force]
 ```
 
 Install 脚本会：
