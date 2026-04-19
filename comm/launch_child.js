@@ -463,9 +463,9 @@ async function cmdSend(subArgs) {
 
 async function cmdRun(subArgs) {
   let runtime = null, model = null, sessionName = null;
-  let outFile = null, eventsFile = null, timeoutMs = 300000, keep = false;
+  let outFile = null, timeoutMs = 300000;
   let prompt = null;
-  let terminated = false, fatalDetected = false, fatalExcerpt = '';
+  const passthrough = [];
 
   for (let i = 0; i < subArgs.length; i++) {
     const a = subArgs[i];
@@ -474,9 +474,10 @@ async function cmdRun(subArgs) {
     else if (a === '--model') model = subArgs[++i];
     else if (a === '--session') sessionName = subArgs[++i];
     else if (a === '--out') outFile = subArgs[++i];
-    else if (a === '--events-file') eventsFile = subArgs[++i];
     else if (a === '--timeout-ms') timeoutMs = parseInt(subArgs[++i], 10);
-    else if (a === '--keep') keep = true;
+    else if (a === '--events-file') { subArgs[++i]; /* no-op */ }
+    else if (a === '--keep') { /* no-op */ }
+    else passthrough.push(a);
   }
 
   if (!runtime || (runtime !== 'claude' && runtime !== 'codex')) {
@@ -493,160 +494,45 @@ async function cmdRun(subArgs) {
 
   if (!outFile) outFile = path.join(SESSIONS_DIR, `${sessionName}.result.txt`);
 
-  const self = process.argv[1];
-  const nodeBin = process.execPath;
+  const startMs = Date.now();
 
-  function runSelf(args) {
-    return spawnSync(nodeBin, [self, ...args], { encoding: 'utf8', stdio: ['inherit', 'pipe', 'inherit'] });
+  // Direct CLI exec — no psmux, no TUI
+  let cmd, args;
+  if (runtime === 'codex') {
+    const effectivePassthrough = [...defaultPassthroughForRuntime(runtime, passthrough), ...passthrough];
+    cmd = 'codex';
+    args = ['exec', '--model', model, ...effectivePassthrough, prompt];
+  } else {
+    cmd = 'claude';
+    args = ['-p', '--model', model, '--dangerously-skip-permissions', ...passthrough, prompt];
   }
 
-  // Step 1: launch
-  const launchRes = runSelf(['launch', '--runtime', runtime, '--model', model, '--session', sessionName]);
-  if (launchRes.status !== 0) {
-    process.stderr.write(`run: launch failed\n`); process.exit(1);
-  }
-
-  const signalDir = path.join(PROJECT, '.claude', 'signals', 'child-events');
-  const events = [];
-
-  function writeEventsFile() {
-    if (!eventsFile) return;
-    const tmp = `${eventsFile}.tmp.${process.pid}`;
-    fs.writeFileSync(tmp, events.map(e => JSON.stringify(e)).join('\n') + '\n');
-    fs.renameSync(tmp, eventsFile);
-  }
-
-  function scanEvents(fromTs) {
-    try {
-      const items = fs.readdirSync(signalDir).filter(f => f.endsWith('.signal'));
-      for (const name of items) {
-        const parts = name.slice(0, -7).split('__');
-        if (parts.length !== 5) continue;
-        if (parts[1] !== sessionName) continue;
-        const ts = parts[0];
-        if (ts < fromTs) continue;
-        const state = parts[2];
-        const key = `${ts}__${state}`;
-        if (!events.find(e => `${e.ts}__${e.state}` === key)) {
-          events.push({ ts, state, session: sessionName });
-        }
-      }
-    } catch {}
-  }
-
-  // Step 2: boot ready poll (max 3s)
-  const bootMarker = runtime === 'codex' ? '›' : '❯';
-  for (let i = 0; i < 10; i++) {
-    await new Promise(r => setTimeout(r, 300));
-    const cap = spawnSync('psmux', ['capture-pane', '-t', sessionName, '-p'], { encoding: 'utf8' });
-    if (cap.stdout && cap.stdout.includes(bootMarker)) break;
-  }
-
-  // Step 3: send prompt
-  const sendAt = new Date().toISOString().replace(/[-:]/g, '').replace(/\.(\d+)Z/, (_, f) => '.' + f.padEnd(7, '0') + 'Z');
-  const sendRes = runSelf(['send', '--session', sessionName, '--text', prompt]);
-  const sendStart = Date.now();
-  if (sendRes.status !== 0) {
-    process.stderr.write(`run: send failed\n`);
-    if (!keep) runSelf(['kill', '--session', sessionName]);
-    process.exit(1);
-  }
-
-  // 启动期哨兵：8s 后 capture-pane 看 claude 是否报 fatal 错（model 不存在 / auth 失败 / 未登录）
-  const FATAL_PATTERNS = [
-    /There's an issue with the selected model/,
-    /model.*may not exist/i,
-    /unauthorized/i,
-    /invalid.*api/i,
-    /auth.*token.*invalid/i,
-    /Please log in/i,
-  ];
-  const fatalTimer = setTimeout(() => {
-    if (terminated) return;
-    const capRes = spawnSync('psmux', ['capture-pane', '-t', sessionName, '-p'], { encoding: 'utf8' });
-    const pane = capRes.stdout || '';
-    // 只扫 claude 输出行（● 开头或 错误标识），不扫用户 prompt（❯ 开头）
-    const lines = pane.split('\n').filter(l => !/^❯\s*/.test(l));
-    const joined = lines.join('\n');
-    for (const re of FATAL_PATTERNS) {
-      if (re.test(joined)) {
-        fatalDetected = true;
-        fatalExcerpt = joined.match(re)[0];
-        break;
-      }
-    }
-  }, 8000);
-
-  // Step 4: wait for stop / stop_failure / timeout
-  let final_state = 'timeout', timed_out = true;
-  while (Date.now() - sendStart < timeoutMs) {
-    await new Promise(r => setTimeout(r, 200));
-    scanEvents(sendAt);
-    if (fatalDetected) {
-      final_state = 'stop_failure';
-      timed_out = false;
-      break;
-    }
-    const terminal = events.find(e => e.state === 'stop' || e.state === 'stop_failure');
-    if (terminal) {
-      final_state = terminal.state;
-      timed_out = false;
-      break;
-    }
-  }
-  terminated = true;
-  clearTimeout(fatalTimer);
-
-  // Step 5: extract result
-  let extract_source = 'pane_full_fallback';
-  let result = '';
-  const cap = spawnSync('psmux', ['capture-pane', '-t', sessionName, '-p', '-S', '-500'], { encoding: 'utf8' });
-  if (cap.stdout) {
-    if (runtime === 'claude') {
-      // Heuristic: find last `●` to `❯` segment
-      const m = cap.stdout.match(/●[^\n]*(?:\n[^❯\n]*)*(?=\n\s*❯)/g);
-      if (m && m.length > 0) {
-        result = m[m.length - 1].replace(/^●\s*/, '').trim();
-        extract_source = 'pane_heuristic';
-      } else {
-        result = cap.stdout;
-        extract_source = 'pane_full_fallback';
-      }
-    } else {
-      result = cap.stdout;
-      extract_source = 'pane_full_fallback';
-    }
-  }
+  const res = spawnSync(cmd, args, { encoding: 'utf8', timeout: timeoutMs });
+  const duration = Date.now() - startMs;
 
   fs.mkdirSync(path.dirname(outFile), { recursive: true });
-  fs.writeFileSync(outFile, result);
+  fs.writeFileSync(outFile, res.stdout || '');
 
-  if (eventsFile) writeEventsFile();
-
-  // Step 6: kill unless --keep
-  let killed = false;
-  if (!keep) {
-    const killRes = runSelf(['kill', '--session', sessionName]);
-    killed = killRes.status === 0;
+  let final_state, timed_out = false;
+  if (res.signal === 'SIGTERM' || (res.error && res.error.code === 'ETIMEDOUT')) {
+    final_state = 'timeout'; timed_out = true;
+  } else if (res.status === 0) {
+    final_state = 'stop';
+  } else {
+    final_state = 'stop_failure';
   }
 
   const out = {
-    session: sessionName,
-    runtime, model,
-    final_state,
-    duration_ms: Date.now() - sendStart,
+    session: sessionName, runtime, model, final_state,
+    duration_ms: duration,
     out_file: outFile,
-    events_file: eventsFile,
-    killed,
+    events_file: null,
+    killed: false,
     timed_out,
-    extract_source,
+    extract_source: 'cli_stdout',
   };
-  if (timed_out || final_state === 'stop_failure' || fatalDetected) {
-    try {
-      const capRes = spawnSync('psmux', ['capture-pane', '-t', sessionName, '-p', '-S', '-200'], { encoding: 'utf8' });
-      out.error_excerpt = (capRes.stdout || '').split('\n').slice(-40).join('\n').trim();
-    } catch {}
-    if (fatalDetected) out.fatal_excerpt = fatalExcerpt;
+  if (res.stderr && (final_state !== 'stop' || timed_out)) {
+    out.error_excerpt = res.stderr.split('\n').slice(-40).join('\n').trim();
   }
   console.log(JSON.stringify(out));
 
