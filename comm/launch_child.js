@@ -508,8 +508,8 @@ async function cmdRun(subArgs) {
   }
 
   // Step 3: send prompt
+  const sendAt = new Date().toISOString().replace(/[-:]/g, '').replace(/\.(\d+)Z/, (_, f) => '.' + f.padEnd(7, '0') + 'Z');
   const sendRes = runSelf(['send', '--session', sessionName, '--text', prompt]);
-  const sendAt = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z/, 'Z');  // loose ts
   const sendStart = Date.now();
   if (sendRes.status !== 0) {
     process.stderr.write(`run: send failed\n`);
