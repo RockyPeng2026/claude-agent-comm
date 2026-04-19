@@ -1,1 +1,6 @@
-notify = ["node", "D:\\English\\.claude\\hooks\\codex_hook_bridge.js"]
+# Codex 项目级 config.toml 模板
+# 安装到 <target-project>/.codex/config.toml 后，把 <PROJECT> 占位改成目标项目的
+# 绝对路径（Windows 用双反斜杠 \\ 转义）
+#
+# 示例：D:\\myproject 或 /home/user/myproject
+notify = ["node", "<PROJECT>/.claude/hooks/codex_hook_bridge.js"]
