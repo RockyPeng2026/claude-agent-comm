@@ -500,22 +500,14 @@ async function cmdRun(subArgs) {
   let cmd, args;
   if (runtime === 'codex') {
     const effectivePassthrough = [...defaultPassthroughForRuntime(runtime, passthrough), ...passthrough];
-    const codexArgs = ['exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--model', model, ...effectivePassthrough, prompt];
-    if (process.platform === 'win32') {
-      cmd = 'cmd.exe'; args = ['/c', 'codex', ...codexArgs];
-    } else {
-      cmd = 'codex'; args = codexArgs;
-    }
+    cmd = 'codex';
+    args = ['exec', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '--model', model, ...effectivePassthrough, prompt];
   } else {
-    const claudeArgs = ['-p', '--model', model, '--dangerously-skip-permissions', ...passthrough, prompt];
-    if (process.platform === 'win32') {
-      cmd = 'cmd.exe'; args = ['/c', 'claude', ...claudeArgs];
-    } else {
-      cmd = 'claude'; args = claudeArgs;
-    }
+    cmd = 'claude';
+    args = ['-p', '--model', model, '--dangerously-skip-permissions', ...passthrough, prompt];
   }
 
-  const res = spawnSync(cmd, args, { encoding: 'utf8', timeout: timeoutMs, stdio: ['ignore', 'pipe', 'pipe'] });
+  const res = spawnSync(cmd, args, { encoding: 'utf8', timeout: timeoutMs });
   const duration = Date.now() - startMs;
 
   fs.mkdirSync(path.dirname(outFile), { recursive: true });
