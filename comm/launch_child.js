@@ -48,7 +48,8 @@ function usage() {
     '  kill      --session NAME\n' +
     '  list\n' +
     '  status    --session NAME\n' +
-    '  send      --session NAME --text "..."'
+    '  send      --session NAME --text "..."\n' +
+    '  run       --runtime X --model Y [--session N] [--out FILE] [--events-file F] [--timeout-ms N] [--keep] -- PROMPT...'
   );
   process.exit(1);
 }
@@ -424,6 +425,162 @@ async function cmdSend(subArgs) {
   console.log(JSON.stringify({ sent: sessionName }));
 }
 
+// ─── run (orchestrates launch + send + wait + capture + kill) ───
+
+async function cmdRun(subArgs) {
+  let runtime = null, model = null, sessionName = null;
+  let outFile = null, eventsFile = null, timeoutMs = 300000, keep = false;
+  let prompt = null;
+
+  for (let i = 0; i < subArgs.length; i++) {
+    const a = subArgs[i];
+    if (a === '--') { prompt = subArgs.slice(i + 1).join(' '); break; }
+    else if (a === '--runtime') runtime = subArgs[++i];
+    else if (a === '--model') model = subArgs[++i];
+    else if (a === '--session') sessionName = subArgs[++i];
+    else if (a === '--out') outFile = subArgs[++i];
+    else if (a === '--events-file') eventsFile = subArgs[++i];
+    else if (a === '--timeout-ms') timeoutMs = parseInt(subArgs[++i], 10);
+    else if (a === '--keep') keep = true;
+  }
+
+  if (!runtime || (runtime !== 'claude' && runtime !== 'codex')) {
+    process.stderr.write('run requires --runtime {claude|codex}\n'); process.exit(1);
+  }
+  if (!model) { process.stderr.write('run requires --model\n'); process.exit(1); }
+  if (!prompt || !prompt.trim()) { process.stderr.write('run requires PROMPT after --\n'); process.exit(1); }
+
+  if (!sessionName) {
+    const hex = require('crypto').randomBytes(2).toString('hex');
+    sessionName = `run-${Math.floor(Date.now() / 1000)}-${hex}`;
+  }
+  assertValidSessionName(sessionName, '--session');
+
+  if (!outFile) outFile = path.join(SESSIONS_DIR, `${sessionName}.result.txt`);
+
+  const self = process.argv[1];
+  const nodeBin = process.execPath;
+
+  function runSelf(args) {
+    return spawnSync(nodeBin, [self, ...args], { encoding: 'utf8', stdio: ['inherit', 'pipe', 'inherit'] });
+  }
+
+  // Step 1: launch
+  const launchRes = runSelf(['launch', '--runtime', runtime, '--model', model, '--session', sessionName]);
+  if (launchRes.status !== 0) {
+    process.stderr.write(`run: launch failed\n`); process.exit(1);
+  }
+
+  const signalDir = path.join(PROJECT, '.claude', 'signals', 'child-events');
+  const events = [];
+
+  function writeEventsFile() {
+    if (!eventsFile) return;
+    const tmp = `${eventsFile}.tmp.${process.pid}`;
+    fs.writeFileSync(tmp, events.map(e => JSON.stringify(e)).join('\n') + '\n');
+    fs.renameSync(tmp, eventsFile);
+  }
+
+  function scanEvents(fromTs) {
+    try {
+      const items = fs.readdirSync(signalDir).filter(f => f.endsWith('.signal'));
+      for (const name of items) {
+        const parts = name.slice(0, -7).split('__');
+        if (parts.length !== 5) continue;
+        if (parts[1] !== sessionName) continue;
+        const ts = parts[0];
+        if (ts < fromTs) continue;
+        const state = parts[2];
+        const key = `${ts}__${state}`;
+        if (!events.find(e => `${e.ts}__${e.state}` === key)) {
+          events.push({ ts, state, session: sessionName });
+        }
+      }
+    } catch {}
+  }
+
+  // Step 2: boot ready poll (max 3s)
+  const bootMarker = runtime === 'codex' ? '›' : '❯';
+  for (let i = 0; i < 10; i++) {
+    await new Promise(r => setTimeout(r, 300));
+    const cap = spawnSync('psmux', ['capture-pane', '-t', sessionName, '-p'], { encoding: 'utf8' });
+    if (cap.stdout && cap.stdout.includes(bootMarker)) break;
+  }
+
+  // Step 3: send prompt
+  const sendRes = runSelf(['send', '--session', sessionName, '--text', prompt]);
+  const sendAt = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z/, 'Z');  // loose ts
+  const sendStart = Date.now();
+  if (sendRes.status !== 0) {
+    process.stderr.write(`run: send failed\n`);
+    if (!keep) runSelf(['kill', '--session', sessionName]);
+    process.exit(1);
+  }
+
+  // Step 4: wait for stop / stop_failure / timeout
+  let final_state = 'timeout', timed_out = true;
+  while (Date.now() - sendStart < timeoutMs) {
+    await new Promise(r => setTimeout(r, 200));
+    scanEvents(sendAt);
+    const terminal = events.find(e => e.state === 'stop' || e.state === 'stop_failure');
+    if (terminal) {
+      final_state = terminal.state;
+      timed_out = false;
+      break;
+    }
+  }
+
+  // Step 5: extract result
+  let extract_source = 'pane_full_fallback';
+  let result = '';
+  const cap = spawnSync('psmux', ['capture-pane', '-t', sessionName, '-p', '-S', '-500'], { encoding: 'utf8' });
+  if (cap.stdout) {
+    if (runtime === 'claude') {
+      // Heuristic: find last `●` to `❯` segment
+      const m = cap.stdout.match(/●[^\n]*(?:\n[^❯\n]*)*(?=\n\s*❯)/g);
+      if (m && m.length > 0) {
+        result = m[m.length - 1].replace(/^●\s*/, '').trim();
+        extract_source = 'pane_heuristic';
+      } else {
+        result = cap.stdout;
+        extract_source = 'pane_full_fallback';
+      }
+    } else {
+      result = cap.stdout;
+      extract_source = 'pane_full_fallback';
+    }
+  }
+
+  fs.mkdirSync(path.dirname(outFile), { recursive: true });
+  fs.writeFileSync(outFile, result);
+
+  if (eventsFile) writeEventsFile();
+
+  // Step 6: kill unless --keep
+  let killed = false;
+  if (!keep) {
+    const killRes = runSelf(['kill', '--session', sessionName]);
+    killed = killRes.status === 0;
+  }
+
+  const out = {
+    session: sessionName,
+    runtime, model,
+    final_state,
+    duration_ms: Date.now() - sendStart,
+    out_file: outFile,
+    events_file: eventsFile,
+    killed,
+    timed_out,
+    extract_source,
+  };
+  console.log(JSON.stringify(out));
+
+  if (timed_out) process.exit(2);
+  if (final_state === 'stop_failure') process.exit(1);
+  process.exit(0);
+}
+
 // ─── main ───
 
 const argv = process.argv.slice(2);
@@ -437,5 +594,6 @@ switch (argv[0]) {
   case 'list':   cmdList(); break;
   case 'status': cmdStatus(subArgs); break;
   case 'send':   cmdSend(subArgs).catch(e => { process.stderr.write(`${e.message}\n`); process.exit(1); }); break;
+  case 'run':    cmdRun(subArgs).catch(e => { process.stderr.write(`${e.message}\n`); process.exit(1); }); break;
   default: usage();
 }
