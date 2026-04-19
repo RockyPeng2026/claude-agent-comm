@@ -143,7 +143,7 @@ node launch_child.js register --session NAME --runtime {claude|codex} [--model M
 
 ### Registry schema
 
-**`sessions/{session}.json`**：`{ session, runtime, model, pid, signal_dir, passthrough, started_at }`（launch 创建）/ `{ ..., registered: true }`（register 补建）
+**`sessions/{session}.json`**：`{ session, runtime, model, pid, signal_dir, passthrough_count, started_at }`（launch 创建）/ `{ ..., registered: true }`（register 补建）。passthrough 原值**不持久化**（可能含 key/PII），只记计数。
 
 **`sessions/{session}.tombstone.json`**：`{ session, killed_at, reason }`
 
