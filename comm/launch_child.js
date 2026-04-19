@@ -2,7 +2,14 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
-const PROJECT = path.resolve(__dirname, '..', '..');
+// PROJECT = target project root. 决定 .claude/signals/ 存哪、子进程 cwd 去哪。
+// 优先 CLAUDE_PROJECT_DIR（Claude Code hook 默认提供），否则从 launch_child.js 位置推：
+//   - 装到目标项目：<target>/.claude/comm/launch_child.js → 向上 2 级 = <target>
+//   - repo dogfood：<repo>/comm/launch_child.js → 向上 1 级 = <repo>
+const PROJECT = process.env.CLAUDE_PROJECT_DIR
+  || (path.basename(path.dirname(__dirname)) === '.claude'
+        ? path.resolve(__dirname, '..', '..')
+        : path.resolve(__dirname, '..'));
 const SESSIONS_DIR = path.join(PROJECT, '.claude', 'signals', 'sessions');
 
 function esc(s) { return "'" + s.replace(/'/g, "''") + "'"; }
@@ -235,15 +242,35 @@ function cmdLaunch(subArgs) {
   // Clear stale tombstone from prior session with same name
   clearStaleTombstone(sessionName);
 
-  // Step 1: Create psmux session
-  const ns = spawnSync('psmux', ['new-session', '-d', '-s', sessionName], { stdio: 'inherit' });
-  if (ns.status !== 0) {
-    process.stderr.write(`psmux new-session failed (exit ${ns.status})\n`);
-    process.exit(1);
+  // Step 1: Build pwsh command (NO secrets typed — env comes via process inheritance)
+  let pwshCmd;
+  if (runtime === 'codex') {
+    const childSignalScript = path.join(PROJECT, '.claude', 'hooks', 'child_signal.js');
+    const failGuard = `if ($LASTEXITCODE -ne 0) { node ${esc(childSignalScript)} --state stop_failure }`;
+    pwshCmd =
+      `Set-Location ${esc(PROJECT)} -ErrorAction Stop; ` +
+      `try { codex --dangerously-bypass-approvals-and-sandbox --model ${esc(model)}` +
+      (passthrough.length ? ' ' + passthrough.map(esc).join(' ') : '') +
+      `; ${failGuard} } catch { node ${esc(childSignalScript)} --state stop_failure }`;
+  } else {
+    pwshCmd =
+      `Set-Location ${esc(PROJECT)} -ErrorAction Stop; ` +
+      `claude --model ${esc(model)} --dangerously-skip-permissions` +
+      (passthrough.length ? ' ' + passthrough.map(esc).join(' ') : '');
   }
 
-  // Step 2: Write registry BEFORE send-keys (watcher needs it to accept first signal).
-  // 不持久化 passthrough（可能含 key / PII），仅记计数。
+  // Step 2: Prepare child env (ANTHROPIC_* / CLAUDE_CHILD_* passed via spawnSync env,
+  // NOT typed into pane; psmux new-session inherits env → pwsh inherits → claude/codex inherits)
+  const childEnv = {
+    ...process.env,
+    CLAUDE_CHILD_HOOKS: '1',
+    CLAUDE_CHILD_SESSION: sessionName,
+    CLAUDE_CHILD_SIGNAL_DIR: signalDir,
+    CLAUDE_PROJECT_DIR: PROJECT,
+  };
+
+  // Step 3: Write registry BEFORE session starts (watcher needs it to accept first signal).
+  // 不持久化 passthrough 原值（可能含 key / PII），仅记计数。
   const regPath = sessionPath(sessionName, '.json');
   const regData = {
     session: sessionName, runtime, model,
@@ -254,67 +281,23 @@ function cmdLaunch(subArgs) {
   try {
     const ok = writeRegistryAtomic(regPath, regData, false);
     if (!ok) {
-      spawnSync('psmux', ['kill-session', '-t', sessionName]);
       process.stderr.write(`session "${sessionName}" already registered\n`);
       process.exit(1);
     }
   } catch (e) {
-    spawnSync('psmux', ['kill-session', '-t', sessionName]);
     process.stderr.write(`registry write failed: ${e.message}\n`);
     process.exit(1);
   }
 
-  // Step 3: Write session env to a temp .ps1 (source + delete before child starts).
-  // 避免 ANTHROPIC_* 明文进 psmux send-keys → pane scrollback 泄露。
-  const envDir = path.join(PROJECT, '.claude', 'signals', 'session-env');
-  fs.mkdirSync(envDir, { recursive: true });
-  const envFile = path.join(envDir, `${sessionName}.ps1`);
-  const envLines = [
-    `$env:CLAUDE_CHILD_HOOKS='1'`,
-    `$env:CLAUDE_CHILD_SESSION=${esc(sessionName)}`,
-    `$env:CLAUDE_CHILD_SIGNAL_DIR=${esc(signalDir)}`,
-    `$env:CLAUDE_PROJECT_DIR=${esc(PROJECT)}`,
-  ];
-  if (runtime === 'claude') {
-    envLines.push(
-      `$env:ANTHROPIC_AUTH_TOKEN=${esc(process.env.ANTHROPIC_AUTH_TOKEN || '')}`,
-      `$env:ANTHROPIC_BASE_URL=${esc(process.env.ANTHROPIC_BASE_URL || '')}`,
-      `$env:API_TIMEOUT_MS=${esc(process.env.API_TIMEOUT_MS || '')}`,
-    );
-  }
-  fs.writeFileSync(envFile, envLines.join('\r\n') + '\r\n', { mode: 0o600 });
-
-  // Step 4: Build command per runtime — typed text only references envFile path, no secrets
-  let cmdLine;
-  const envStanza = `. ${esc(envFile)}; Remove-Item -Force ${esc(envFile)}; `;
-  if (runtime === 'codex') {
-    const childSignalScript = path.join(PROJECT, '.claude', 'hooks', 'child_signal.js');
-    const failGuard = `if ($LASTEXITCODE -ne 0) { node ${esc(childSignalScript)} --state stop_failure }`;
-    cmdLine =
-      `Set-Location ${esc(PROJECT)} -ErrorAction Stop; ` +
-      envStanza +
-      `try { codex --dangerously-bypass-approvals-and-sandbox --model ${esc(model)}` +
-      (passthrough.length ? ' ' + passthrough.map(esc).join(' ') : '') +
-      `; ${failGuard} } catch { node ${esc(childSignalScript)} --state stop_failure }`;
-  } else {
-    cmdLine =
-      `Set-Location ${esc(PROJECT)} -ErrorAction Stop; ` +
-      envStanza +
-      `claude --model ${esc(model)} --dangerously-skip-permissions` +
-      (passthrough.length ? ' ' + passthrough.map(esc).join(' ') : '');
-  }
-
-  // Step 4: send-keys (child starts here — after registry so watcher accepts first signal)
-  try {
-    const sk1 = spawnSync('psmux', ['send-keys', '-t', sessionName, '-l', cmdLine], { stdio: 'inherit' });
-    if (sk1.status !== 0) throw new Error(`send-keys -l failed (exit ${sk1.status})`);
-    const sk2 = spawnSync('psmux', ['send-keys', '-t', sessionName, 'Enter'], { stdio: 'inherit' });
-    if (sk2.status !== 0) throw new Error(`send-keys Enter failed (exit ${sk2.status})`);
-  } catch (e) {
-    spawnSync('psmux', ['kill-session', '-t', sessionName]);
+  // Step 4: Create psmux session with the command — one shot, no send-keys chain needed
+  const ns = spawnSync(
+    'psmux',
+    ['new-session', '-d', '-s', sessionName, '--', 'pwsh', '-NoProfile', '-Command', pwshCmd],
+    { stdio: 'inherit', env: childEnv }
+  );
+  if (ns.status !== 0) {
     try { fs.unlinkSync(regPath); } catch {}
-    try { fs.unlinkSync(envFile); } catch {}
-    process.stderr.write(`${e.message}\n`);
+    process.stderr.write(`psmux new-session failed (exit ${ns.status})\n`);
     process.exit(1);
   }
 
