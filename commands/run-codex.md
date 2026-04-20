@@ -5,7 +5,7 @@ description: /agent-comm:run-codex [--model Y] -- PROMPT  (defaults --runtime co
 
 1. 用 Bash 运行：
    ```
-   node "${CLAUDE_PLUGIN_ROOT}/comm/launch_child.js" launch --runtime codex --prompt "$ARGUMENTS"
+   node "${CLAUDE_PLUGIN_ROOT}/comm/launch_child.js" launch --runtime codex $ARGUMENTS
    ```
    解析 JSON 输出得到 `session`、`signal_dir`、`out_file`。
 

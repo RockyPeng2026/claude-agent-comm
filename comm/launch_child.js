@@ -280,6 +280,10 @@ function cmdLaunch(subArgs) {
         process.stderr.write('--runtime must be claude or codex\n');
         process.exit(1);
       }
+    } else if (subArgs[i] === '--') {
+      // 分隔符后面整段当 prompt（对齐 cmdRun）
+      prompt = subArgs.slice(i + 1).join(' ');
+      break;
     } else if (subArgs[i] === '--prompt') {
       if (i + 1 >= subArgs.length) { process.stderr.write('--prompt requires a value\n'); process.exit(1); }
       prompt = subArgs[++i];

@@ -5,7 +5,7 @@ description: /agent-comm:run-claude [--model Y] -- PROMPT  (defaults --runtime c
 
 1. 用 Bash 运行：
    ```
-   node "${CLAUDE_PLUGIN_ROOT}/comm/launch_child.js" launch --runtime claude --prompt "$ARGUMENTS"
+   node "${CLAUDE_PLUGIN_ROOT}/comm/launch_child.js" launch --runtime claude $ARGUMENTS
    ```
    （如果 $ARGUMENTS 里包含 `--model X`，解析 X 并加到 launch 命令，例如 `--model X`；其余参数原样转 passthrough。）
    解析 JSON 输出得到 `session`、`signal_dir`、`out_file`。
