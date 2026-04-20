@@ -47,6 +47,19 @@
           }
         ]
       }
+    ],
+    "FileChanged": [
+      {
+        "matcher": "agent-comm-deliveries.jsonl",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/rewake_delivery.js\"",
+            "asyncRewake": true,
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }

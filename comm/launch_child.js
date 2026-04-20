@@ -118,6 +118,7 @@ function usage() {
     '  send      --session NAME --text "..."\n' +
     '  wait      --session NAME [--timeout-ms N]            (阻塞到 stop 事件)\n' +
     '  collect   --session NAME [--kill]                    (读 result，可选 kill)\n' +
+    '  notify    --session NAME [--timeout-ms N]            (detached worker → append deliveries.jsonl)\n' +
     '  run       --runtime X [--model Y] [--session N] [--out FILE] [--events-file F] [--timeout-ms N] [--keep] -- PROMPT...\n' +
     '    default: codex=gpt-5.4 + -c model_reasoning_effort=high; claude=glm-5.1(proxy) | claude-opus-4-7(oauth)'
   );
@@ -637,6 +638,34 @@ function cmdCollect(subArgs) {
   }
 }
 
+// ─── notify (detached worker: wait + collect + append delivery JSONL) ───
+
+function cmdNotify(subArgs) {
+  let sessionName = null;
+  let timeoutMs = 900000;
+  for (let i = 0; i < subArgs.length; i++) {
+    if (subArgs[i] === '--session') sessionName = subArgs[++i];
+    else if (subArgs[i] === '--timeout-ms') timeoutMs = parseInt(subArgs[++i], 10);
+  }
+  if (!sessionName) { process.stderr.write('notify requires --session\n'); process.exit(1); }
+  assertValidSessionName(sessionName, '--session');
+
+  const worker = path.resolve(__dirname, '..', 'hooks', 'notify_worker.js');
+  const nodeBin = process.execPath;
+  const { spawn } = require('child_process');
+  const child = spawn(
+    nodeBin,
+    [worker, '--session', sessionName, '--timeout-ms', String(timeoutMs)],
+    {
+      detached: true,
+      stdio: 'ignore',
+      env: { ...process.env, CLAUDE_PROJECT_DIR: process.env.CLAUDE_PROJECT_DIR || PROJECT }
+    }
+  );
+  child.unref();
+  console.log(JSON.stringify({ notify_armed: true, session: sessionName, pid: child.pid }));
+}
+
 // ─── run (orchestrates launch + send + wait + capture + kill) ───
 
 async function cmdRun(subArgs) {
@@ -747,6 +776,7 @@ switch (argv[0]) {
   case 'send':   cmdSend(subArgs).catch(e => { process.stderr.write(`${e.message}\n`); process.exit(1); }); break;
   case 'wait':    cmdWait(subArgs).catch(e => { process.stderr.write(`${e.message}\n`); process.exit(1); }); break;
   case 'collect': cmdCollect(subArgs); break;
+  case 'notify':  cmdNotify(subArgs); break;
   case 'run':    cmdRun(subArgs).catch(e => { process.stderr.write(`${e.message}\n`); process.exit(1); }); break;
   default: usage();
 }

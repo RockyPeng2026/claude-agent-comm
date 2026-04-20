@@ -1,13 +1,9 @@
 ---
-description: /agent-comm:run [--runtime X] [--model Y] -- PROMPT  (事件驱动非阻塞)
+description: /agent-comm:run [--runtime X] [--model Y] -- PROMPT (真事件驱动)
 ---
-你是父 Claude。用户发来 `/agent-comm:run $ARGUMENTS`。**不要调用 subagent**。按下列步骤执行：
+你是父 Claude。用户发 `/agent-comm:run $ARGUMENTS`。**不调 subagent，不装 Monitor**。
 
-1. 从 $ARGUMENTS 解析 `--runtime`、`--model`，其余给 launch 作为 passthrough + prompt。
-   用 Bash 运行：
-   ```
-   node "${CLAUDE_PLUGIN_ROOT}/comm/launch_child.js" launch $ARGUMENTS
-   ```
-   解析 JSON 输出得到 `session`、`signal_dir`、`out_file`。
-
-2-5. 同 `run-codex.md` 的 2-5 步。
+1. `node "${CLAUDE_PLUGIN_ROOT}/comm/launch_child.js" launch $ARGUMENTS` → session
+2. `node "${CLAUDE_PLUGIN_ROOT}/comm/launch_child.js" notify --session <session>`
+3. 告诉用户已启动 end turn
+4. 等 FileChanged system-reminder 贴结果
