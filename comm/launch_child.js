@@ -110,7 +110,7 @@ function defaultPassthroughForRuntime(runtime, args) {
 function usage() {
   process.stderr.write(
     'Usage: node launch_child.js <subcommand> [options]\n' +
-    '  launch    --runtime {claude|codex} --session NAME [--model X]\n' +
+    '  launch    --runtime {claude|codex} --session NAME [--model X] [--prompt "..."]\n' +
     '  register  --session NAME --runtime {claude|codex} [--model M] [--pid N] [--parent P] [--force]\n' +
     '  kill      --session NAME\n' +
     '  list\n' +
@@ -261,6 +261,7 @@ function cmdLaunch(subArgs) {
   let model = null, runtime = 'claude';
   let sessionName = `child-${Math.floor(Date.now() / 1000)}`;
   const passthrough = [];
+  let prompt = null;
 
   for (let i = 0; i < subArgs.length; i++) {
     if (subArgs[i] === '--model') {
@@ -277,6 +278,9 @@ function cmdLaunch(subArgs) {
         process.stderr.write('--runtime must be claude or codex\n');
         process.exit(1);
       }
+    } else if (subArgs[i] === '--prompt') {
+      if (i + 1 >= subArgs.length) { process.stderr.write('--prompt requires a value\n'); process.exit(1); }
+      prompt = subArgs[++i];
     } else {
       passthrough.push(subArgs[i]);
     }
@@ -323,16 +327,20 @@ function cmdLaunch(subArgs) {
     const notifyArg = `-c 'notify=["node","${bridgeForToml}"]'`;
     const childSignalScript = path.join(PROJECT, '.claude', 'hooks', 'child_signal.js');
     const failGuard = `if ($LASTEXITCODE -ne 0) { node ${esc(childSignalScript)} --state stop_failure }`;
+    const promptSuffix = prompt ? ` ${esc(prompt)}` : '';
     pwshCmd =
       `Set-Location ${esc(PROJECT)} -ErrorAction Stop; ` +
       `try { codex --dangerously-bypass-approvals-and-sandbox --model ${esc(model)} ${notifyArg}` +
       (effectivePassthrough.length ? ' ' + effectivePassthrough.map(esc).join(' ') : '') +
+      promptSuffix +
       `; ${failGuard} } catch { node ${esc(childSignalScript)} --state stop_failure }`;
   } else {
+    const promptSuffix = prompt ? ` ${esc(prompt)}` : '';
     pwshCmd =
       `Set-Location ${esc(PROJECT)} -ErrorAction Stop; ` +
       `claude --model ${esc(model)} --dangerously-skip-permissions` +
-      (effectivePassthrough.length ? ' ' + effectivePassthrough.map(esc).join(' ') : '');
+      (effectivePassthrough.length ? ' ' + effectivePassthrough.map(esc).join(' ') : '') +
+      promptSuffix;
   }
 
   // Step 2: Prepare child env (only expose ANTHROPIC_* to claude runtime; codex 走自己的 OAuth)
@@ -486,11 +494,13 @@ async function cmdSend(subArgs) {
 
   const reg = readRegistry(sessionName);
 
-  const res = muxPasteAndSubmit(sessionName, text);
-  if (!res.ok) {
-    process.stderr.write(`${MUX} ${res.step} failed (exit ${res.status})\n`);
-    process.exit(1);
-  }
+  // experimental: 位置参数路径覆盖了 cmdRun 的首次 prompt；本函数仅给未来多轮用
+  const sk1 = spawnSync(MUX, ['send-keys', '-t', sessionName, '-l', text], { stdio: 'inherit' });
+  if (sk1.status !== 0) { process.stderr.write(`${MUX} send-keys -l failed (exit ${sk1.status})\n`); process.exit(1); }
+  // paste_burst 抑制窗 ≤120ms，预留 300ms 冗余
+  await new Promise(r => setTimeout(r, 300));
+  const sk2 = spawnSync(MUX, ['send-keys', '-t', sessionName, 'Enter'], { stdio: 'inherit' });
+  if (sk2.status !== 0) { process.stderr.write(`${MUX} send-keys Enter failed (exit ${sk2.status})\n`); process.exit(1); }
 
   console.log(JSON.stringify({ sent: sessionName }));
 }
@@ -536,8 +546,8 @@ async function cmdRun(subArgs) {
     return spawnSync(nodeBin, [self, ...args], { encoding: 'utf8', stdio: ['inherit', 'pipe', 'inherit'] });
   }
 
-  // Step 1: launch
-  const launchRes = runSelf(['launch', '--runtime', runtime, '--model', model, '--session', sessionName]);
+  // Step 1: launch (prompt 作为位置参数传给 runtime，启动即 submit)
+  const launchRes = runSelf(['launch', '--runtime', runtime, '--model', model, '--session', sessionName, '--prompt', prompt]);
   if (launchRes.status !== 0) {
     process.stderr.write(`run: launch failed\n`); process.exit(1);
   }
@@ -571,22 +581,14 @@ async function cmdRun(subArgs) {
   }
 
   // Step 2: boot ready poll (max 3s)
+  const sendAt = new Date().toISOString().replace(/[-:]/g, '').replace(/\.(\d+)Z/, (_, f) => '.' + f.padEnd(7, '0') + 'Z');
   const bootMarker = runtime === 'codex' ? '›' : '❯';
   for (let i = 0; i < 10; i++) {
     await new Promise(r => setTimeout(r, 300));
     const cap = muxCapture(sessionName);
     if (cap.stdout && cap.stdout.includes(bootMarker)) break;
   }
-
-  // Step 3: send prompt
-  const sendAt = new Date().toISOString().replace(/[-:]/g, '').replace(/\.(\d+)Z/, (_, f) => '.' + f.padEnd(7, '0') + 'Z');
-  const sendRes = runSelf(['send', '--session', sessionName, '--text', prompt]);
   const sendStart = Date.now();
-  if (sendRes.status !== 0) {
-    process.stderr.write(`run: send failed\n`);
-    if (!keep) runSelf(['kill', '--session', sessionName]);
-    process.exit(1);
-  }
 
   // 启动期哨兵：8s 后 capture-pane 看 claude 是否报 fatal 错（model 不存在 / auth 失败 / 未登录）
   const FATAL_PATTERNS = [
