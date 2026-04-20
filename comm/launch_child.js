@@ -116,6 +116,8 @@ function usage() {
     '  list\n' +
     '  status    --session NAME\n' +
     '  send      --session NAME --text "..."\n' +
+    '  wait      --session NAME [--timeout-ms N]            (阻塞到 stop 事件)\n' +
+    '  collect   --session NAME [--kill]                    (读 result，可选 kill)\n' +
     '  run       --runtime X [--model Y] [--session N] [--out FILE] [--events-file F] [--timeout-ms N] [--keep] -- PROMPT...\n' +
     '    default: codex=gpt-5.4 + -c model_reasoning_effort=high; claude=glm-5.1(proxy) | claude-opus-4-7(oauth)'
   );
@@ -359,9 +361,12 @@ function cmdLaunch(subArgs) {
   // Step 3: Write registry BEFORE session starts (watcher needs it to accept first signal).
   // 不持久化 passthrough 原值（可能含 key / PII），仅记计数。
   const regPath = sessionPath(sessionName, '.json');
+  // out_file 默认 sessions/{name}.result.txt；cmdRun 可 override，但 launch 单独调用也要有
+  const defaultOutFile = path.join(SESSIONS_DIR, `${sessionName}.result.txt`);
   const regData = {
     session: sessionName, runtime, model,
     pid: process.pid, signal_dir: signalDir,
+    out_file: defaultOutFile,
     passthrough_count: effectivePassthrough.length,
     started_at: new Date().toISOString()
   };
@@ -388,7 +393,12 @@ function cmdLaunch(subArgs) {
     process.exit(1);
   }
 
-  console.log(JSON.stringify({ session: sessionName, runtime, model, attach_cmd: `${MUX} attach -t ${sessionName}` }));
+  console.log(JSON.stringify({
+    session: sessionName, runtime, model,
+    signal_dir: signalDir,
+    out_file: defaultOutFile,
+    attach_cmd: `${MUX} attach -t ${sessionName}`
+  }));
 }
 
 // ─── kill ───
@@ -506,13 +516,129 @@ async function cmdSend(subArgs) {
   console.log(JSON.stringify({ sent: sessionName }));
 }
 
+// ─── wait (block until stop/stop_failure signal for a session) ───
+
+async function cmdWait(subArgs) {
+  let sessionName = null;
+  let timeoutMs = 300000;
+  for (let i = 0; i < subArgs.length; i++) {
+    if (subArgs[i] === '--session') sessionName = subArgs[++i];
+    else if (subArgs[i] === '--timeout-ms') timeoutMs = parseInt(subArgs[++i], 10);
+  }
+  if (!sessionName) { process.stderr.write('wait requires --session\n'); process.exit(1); }
+  assertValidSessionName(sessionName, '--session');
+
+  const reg = readRegistry(sessionName);
+  const signalDir = reg.signal_dir || path.join(PROJECT, '.claude', 'signals', 'child-events');
+
+  const startTs = reg.started_at ? reg.started_at.replace(/[-:]/g, '').replace(/\.(\d+)Z/, (_, f) => '.' + f.padEnd(7, '0') + 'Z') : '00000000T000000.0000000Z';
+  const deadline = Date.now() + timeoutMs;
+  let finalState = null;
+  const seen = new Set();
+  const events = [];
+
+  while (Date.now() < deadline) {
+    try {
+      const items = fs.readdirSync(signalDir).filter(f => f.endsWith('.signal'));
+      for (const name of items) {
+        const parts = name.slice(0, -7).split('__');
+        if (parts.length !== 5) continue;
+        if (parts[1] !== sessionName) continue;
+        if (parts[0] < startTs) continue;
+        if (seen.has(name)) continue;
+        seen.add(name);
+        events.push({ ts: parts[0], state: parts[2] });
+        if (parts[2] === 'stop' || parts[2] === 'stop_failure') {
+          finalState = parts[2];
+        }
+      }
+    } catch {}
+    if (finalState) break;
+    await new Promise(r => setTimeout(r, 500));
+  }
+
+  const out = {
+    session: sessionName,
+    final_state: finalState || 'timeout',
+    events,
+    timed_out: !finalState
+  };
+  console.log(JSON.stringify(out));
+  if (!finalState) process.exit(2);
+  if (finalState === 'stop_failure') process.exit(1);
+  process.exit(0);
+}
+
+// ─── collect (read result from session via capture-pane, optionally kill) ───
+
+function cmdCollect(subArgs) {
+  let sessionName = null;
+  let killAfter = false;
+  for (let i = 0; i < subArgs.length; i++) {
+    if (subArgs[i] === '--session') sessionName = subArgs[++i];
+    else if (subArgs[i] === '--kill') killAfter = true;
+  }
+  if (!sessionName) { process.stderr.write('collect requires --session\n'); process.exit(1); }
+  assertValidSessionName(sessionName, '--session');
+
+  const reg = readRegistry(sessionName);
+  const outFile = reg.out_file || path.join(SESSIONS_DIR, `${sessionName}.result.txt`);
+  const runtime = reg.runtime;
+
+  const cap = muxCapture(sessionName, 500);
+  let extractSource = 'pane_full_fallback';
+  let result = '';
+  if (cap.stdout) {
+    if (runtime === 'claude') {
+      const lastDotIdx = cap.stdout.lastIndexOf('●');
+      if (lastDotIdx !== -1) {
+        const after = cap.stdout.slice(lastDotIdx);
+        const endIdx = after.indexOf('\n❯');
+        result = endIdx !== -1 ? after.slice(0, endIdx).trim() : after.trim();
+        extractSource = 'pane_heuristic';
+      } else {
+        result = cap.stdout.trim();
+      }
+    } else {
+      // codex: 找最后一个 '• ' 段
+      const lastBulletIdx = cap.stdout.lastIndexOf('• ');
+      if (lastBulletIdx !== -1) {
+        const after = cap.stdout.slice(lastBulletIdx);
+        const endIdx = after.indexOf('\n›');
+        result = endIdx !== -1 ? after.slice(0, endIdx).trim() : after.trim();
+        extractSource = 'pane_heuristic';
+      } else {
+        result = cap.stdout.trim();
+      }
+    }
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(outFile), { recursive: true });
+    fs.writeFileSync(outFile, result);
+  } catch {}
+
+  const out = {
+    session: sessionName,
+    runtime,
+    out_file: outFile,
+    extract_source: extractSource,
+    result_excerpt: result.split('\n').slice(0, 40).join('\n')
+  };
+  console.log(JSON.stringify(out));
+
+  if (killAfter) {
+    muxKill(sessionName);
+    try { fs.unlinkSync(sessionPath(sessionName, '.json')); } catch {}
+  }
+}
+
 // ─── run (orchestrates launch + send + wait + capture + kill) ───
 
 async function cmdRun(subArgs) {
   let runtime = null, model = null, sessionName = null;
   let outFile = null, eventsFile = null, timeoutMs = 300000, keep = false;
   let prompt = null;
-  let terminated = false, fatalDetected = false, fatalExcerpt = '';
 
   for (let i = 0; i < subArgs.length; i++) {
     const a = subArgs[i];
@@ -538,159 +664,67 @@ async function cmdRun(subArgs) {
   }
   assertValidSessionName(sessionName, '--session');
 
-  if (!outFile) outFile = path.join(SESSIONS_DIR, `${sessionName}.result.txt`);
-
   const self = process.argv[1];
   const nodeBin = process.execPath;
-
   function runSelf(args) {
     return spawnSync(nodeBin, [self, ...args], { encoding: 'utf8', stdio: ['inherit', 'pipe', 'inherit'] });
   }
 
-  // Step 1: launch (prompt 作为位置参数传给 runtime，启动即 submit)
+  // Step 1: launch（秒回）
   const launchRes = runSelf(['launch', '--runtime', runtime, '--model', model, '--session', sessionName, '--prompt', prompt]);
   if (launchRes.status !== 0) {
-    process.stderr.write(`run: launch failed\n`); process.exit(1);
+    process.stderr.write('run: launch failed\n'); process.exit(1);
   }
-
-  const signalDir = path.join(PROJECT, '.claude', 'signals', 'child-events');
-  const events = [];
-
-  function writeEventsFile() {
-    if (!eventsFile) return;
-    const tmp = `${eventsFile}.tmp.${process.pid}`;
-    fs.writeFileSync(tmp, events.map(e => JSON.stringify(e)).join('\n') + '\n');
-    fs.renameSync(tmp, eventsFile);
-  }
-
-  function scanEvents(fromTs) {
+  let launchJson;
+  try { launchJson = JSON.parse(launchRes.stdout); } catch { process.stderr.write('run: launch stdout not JSON\n'); process.exit(1); }
+  if (outFile) {
+    // 若调用方指定 --out，override registry 里的默认
+    const regPath = sessionPath(sessionName, '.json');
     try {
-      const items = fs.readdirSync(signalDir).filter(f => f.endsWith('.signal'));
-      for (const name of items) {
-        const parts = name.slice(0, -7).split('__');
-        if (parts.length !== 5) continue;
-        if (parts[1] !== sessionName) continue;
-        const ts = parts[0];
-        if (ts < fromTs) continue;
-        const state = parts[2];
-        const key = `${ts}__${state}`;
-        if (!events.find(e => `${e.ts}__${e.state}` === key)) {
-          events.push({ ts, state, session: sessionName });
-        }
-      }
+      const reg = JSON.parse(fs.readFileSync(regPath, 'utf8'));
+      reg.out_file = outFile;
+      atomicWrite(regPath, reg);
     } catch {}
   }
 
-  // Step 2: boot ready poll (max 3s)
-  const sendAt = new Date().toISOString().replace(/[-:]/g, '').replace(/\.(\d+)Z/, (_, f) => '.' + f.padEnd(7, '0') + 'Z');
-  const bootMarker = runtime === 'codex' ? '›' : '❯';
-  for (let i = 0; i < 10; i++) {
-    await new Promise(r => setTimeout(r, 300));
-    const cap = muxCapture(sessionName);
-    if (cap.stdout && cap.stdout.includes(bootMarker)) break;
-  }
-  const sendStart = Date.now();
+  // Step 2: wait（阻塞等 stop/stop_failure）
+  const waitRes = runSelf(['wait', '--session', sessionName, '--timeout-ms', String(timeoutMs)]);
+  let waitJson = {};
+  try { waitJson = JSON.parse(waitRes.stdout); } catch {}
+  const finalState = waitJson.final_state || 'timeout';
+  const events = waitJson.events || [];
 
-  // 启动期哨兵：8s 后 capture-pane 看 claude 是否报 fatal 错（model 不存在 / auth 失败 / 未登录）
-  const FATAL_PATTERNS = [
-    /There's an issue with the selected model/,
-    /model.*may not exist/i,
-    /unauthorized/i,
-    /invalid.*api/i,
-    /auth.*token.*invalid/i,
-    /Please log in/i,
-  ];
-  const fatalTimer = setTimeout(() => {
-    if (terminated) return;
-    const capRes = muxCapture(sessionName);
-    const pane = capRes.stdout || '';
-    // 只扫 claude 输出行（● 开头或 错误标识），不扫用户 prompt（❯ 开头）
-    const lines = pane.split('\n').filter(l => !/^❯\s*/.test(l));
-    const joined = lines.join('\n');
-    for (const re of FATAL_PATTERNS) {
-      if (re.test(joined)) {
-        fatalDetected = true;
-        fatalExcerpt = joined.match(re)[0];
-        break;
-      }
-    }
-  }, 8000);
+  // Step 3: collect（读 result，按 keep 决定是否 kill）
+  const collectArgs = ['collect', '--session', sessionName];
+  if (!keep) collectArgs.push('--kill');
+  const collectRes = runSelf(collectArgs);
+  let collectJson = {};
+  try { collectJson = JSON.parse(collectRes.stdout); } catch {}
 
-  // Step 4: wait for stop / stop_failure / timeout
-  let final_state = 'timeout', timed_out = true;
-  while (Date.now() - sendStart < timeoutMs) {
-    await new Promise(r => setTimeout(r, 200));
-    scanEvents(sendAt);
-    if (fatalDetected) {
-      final_state = 'stop_failure';
-      timed_out = false;
-      break;
-    }
-    const terminal = events.find(e => e.state === 'stop' || e.state === 'stop_failure');
-    if (terminal) {
-      final_state = terminal.state;
-      timed_out = false;
-      break;
-    }
-  }
-  terminated = true;
-  clearTimeout(fatalTimer);
-
-  // Step 5: extract result
-  let extract_source = 'pane_full_fallback';
-  let result = '';
-  const cap = muxCapture(sessionName, 500);
-  if (cap.stdout) {
-    if (runtime === 'claude') {
-      // Heuristic: find last `●` to `❯` segment
-      const m = cap.stdout.match(/●[^\n]*(?:\n[^❯\n]*)*(?=\n\s*❯)/g);
-      if (m && m.length > 0) {
-        result = m[m.length - 1].replace(/^●\s*/, '').trim();
-        extract_source = 'pane_heuristic';
-      } else {
-        result = cap.stdout;
-        extract_source = 'pane_full_fallback';
-      }
-    } else {
-      result = cap.stdout;
-      extract_source = 'pane_full_fallback';
-    }
-  }
-
-  fs.mkdirSync(path.dirname(outFile), { recursive: true });
-  fs.writeFileSync(outFile, result);
-
-  if (eventsFile) writeEventsFile();
-
-  // Step 6: kill unless --keep
-  let killed = false;
-  if (!keep) {
-    const killRes = runSelf(['kill', '--session', sessionName]);
-    killed = killRes.status === 0;
+  if (eventsFile) {
+    try {
+      const tmp = `${eventsFile}.tmp.${process.pid}`;
+      fs.writeFileSync(tmp, events.map(e => JSON.stringify(e)).join('\n') + '\n');
+      fs.renameSync(tmp, eventsFile);
+    } catch {}
   }
 
   const out = {
     session: sessionName,
-    runtime, model,
-    final_state,
-    duration_ms: Date.now() - sendStart,
-    out_file: outFile,
-    events_file: eventsFile,
-    killed,
-    timed_out,
-    extract_source,
+    runtime,
+    model,
+    final_state: finalState,
+    timed_out: finalState === 'timeout',
+    killed: !keep,
+    out_file: collectJson.out_file || launchJson.out_file,
+    extract_source: collectJson.extract_source,
+    duration_ms: Date.now() - Date.parse(launchJson.started_at || new Date().toISOString()),
+    events_count: events.length
   };
-  if (timed_out || final_state === 'stop_failure' || fatalDetected) {
-    try {
-      const capRes = muxCapture(sessionName, 200);
-      out.error_excerpt = (capRes.stdout || '').split('\n').slice(-40).join('\n').trim();
-    } catch {}
-    if (fatalDetected) out.fatal_excerpt = fatalExcerpt;
-  }
   console.log(JSON.stringify(out));
 
-  if (timed_out) process.exit(2);
-  if (final_state === 'stop_failure') process.exit(1);
+  if (finalState === 'timeout') process.exit(2);
+  if (finalState === 'stop_failure') process.exit(1);
   process.exit(0);
 }
 
@@ -707,6 +741,8 @@ switch (argv[0]) {
   case 'list':   cmdList(); break;
   case 'status': cmdStatus(subArgs); break;
   case 'send':   cmdSend(subArgs).catch(e => { process.stderr.write(`${e.message}\n`); process.exit(1); }); break;
+  case 'wait':    cmdWait(subArgs).catch(e => { process.stderr.write(`${e.message}\n`); process.exit(1); }); break;
+  case 'collect': cmdCollect(subArgs); break;
   case 'run':    cmdRun(subArgs).catch(e => { process.stderr.write(`${e.message}\n`); process.exit(1); }); break;
   default: usage();
 }
