@@ -325,7 +325,8 @@ function cmdLaunch(subArgs) {
     const bridgeForToml = bridgeScript.replace(/\\/g, '/');
     // pwsh 字面量包：否则 [...,...] 被当成 PowerShell 数组解析，codex 收到被拍扁的 string 报 "invalid type"
     const notifyArg = `-c 'notify=["node","${bridgeForToml}"]'`;
-    const childSignalScript = path.join(PROJECT, '.claude', 'hooks', 'child_signal.js');
+    // child_signal.js 住在 plugin hooks/ 目录（与本 launcher 同级：./comm/launch_child.js → ../hooks/child_signal.js）
+    const childSignalScript = path.resolve(__dirname, '..', 'hooks', 'child_signal.js');
     const failGuard = `if ($LASTEXITCODE -ne 0) { node ${esc(childSignalScript)} --state stop_failure }`;
     const promptSuffix = prompt ? ` ${esc(prompt)}` : '';
     pwshCmd =
